@@ -1,4 +1,6 @@
+import argparse
 import random
+import time
 
 import pygame
 import socket
@@ -28,6 +30,11 @@ CARDS = [
 english_names = [card_data[each]['englishName'] for each in CARDS]
 
 resolved = dict(zip(english_names, CARDS))
+
+# The eight cards the trained agent knows. Anything else is not in its hand encoding,
+# so a game against `server.py --ai` is played with this deck on both sides.
+TRAINING_DECK = ['Knight', 'MiniPekka', 'Arrows', 'Minions',
+                 'Musketeer', 'Fireball', 'Giant', 'Archer']
 
 CARD_SIZE = 80
 CARD_W, CARD_H = 60, 90
@@ -109,18 +116,28 @@ def ip_input_screen():
                 elif event.unicode.isprintable(): ip += event.unicode
 
 # --- Main ---
-if not DEBUG:
-    deck = card_selection_screen()
-    deck = [resolved[each] for each in deck]
-else:
+ap = argparse.ArgumentParser(description="Clash Royale client. Playing against "
+                                         "`server.py --ai` needs --deck training.")
+ap.add_argument("--host", default=None, help="server address; asks on screen if omitted")
+ap.add_argument("--port", type=int, default=PORT)
+ap.add_argument("--deck", default=None,
+                help="'training' for the eight cards the agent knows, 'random' for a "
+                     "random eight, or a comma-separated list; opens the picker if omitted")
+opts = ap.parse_args()
+
+if opts.deck == "training":
+    deck = TRAINING_DECK[:]
+elif opts.deck == "random":
     deck = random.sample(CARDS, 8)
-if not DEBUG:
-    server_ip = ip_input_screen()
+elif opts.deck:
+    deck = [c.strip() for c in opts.deck.split(",")]
 else:
-    server_ip = "192.168.0.103"
+    deck = [resolved[each] for each in card_selection_screen()]
+
+server_ip = opts.host or ip_input_screen()
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((server_ip, PORT))
+sock.connect((server_ip, opts.port))
 
 # Receive hello
 hello = json.loads(sock.makefile().readline())
@@ -132,17 +149,28 @@ json.loads(sock.makefile().readline())  # 'start' message
 print("Game started!")
 
 # State receiver thread
-state = {'entities': [], 'elixir': [5, 5], 'game_over': False, 'winner': None}
+state = {'entities': [], 'elixir': [5, 5], 'game_over': False, 'winner': None,
+         'hands': [deck, deck], 'time': 0.0}
 def receiver():
     f = sock.makefile()
     while True:
         try:
-            msg = json.loads(f.readline())
+            line = f.readline()
+            if not line:      # server closed after the game ended
+                break
+            msg = json.loads(line)
             if msg['type'] == 'state':
                 state.update(msg)
         except: break
 
 threading.Thread(target=receiver, daemon=True).start()
+
+# The server decides the deck (against `--ai` it overrides both sides), so wait for the
+# first real state before drawing anything rather than rendering a hand it may replace.
+for _ in range(200):
+    if state['entities']:
+        break
+    time.sleep(0.05)
 
 TILE = 22
 AX, AY = 50, 50

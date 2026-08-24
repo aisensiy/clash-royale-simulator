@@ -211,6 +211,15 @@ class CREnv(gym.Env):
 
         return np.concatenate([slot_mask, legal.any(axis=1), legal.any(axis=0)])
 
+    def note_external_play(self, player_id, card_name):
+        """Record a play that did not go through `deploy`.
+
+        The live server owns its own BattleState and applies the human player's cards
+        itself, so without this the agent would card-count only its own plays and read
+        its opponent's hand as unknown for the whole game.
+        """
+        self._plays[player_id].append(card_name)
+
     def _known_cycle_tail(self, player_id):
         """The suffix of `player_id`'s cycle that a spectator can pin down exactly.
 
