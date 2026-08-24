@@ -47,7 +47,8 @@ def play_match(args):
     blue = load_agent(blue_spec, masked)
     red = load_agent(red_spec, masked)
     env = CREnv(opponent_model=red,
-                rich_obs=getattr(blue, "rich_obs", False) or getattr(red, "rich_obs", False))
+                rich_obs=getattr(blue, "rich_obs", False),
+                opponent_rich_obs=getattr(red, "rich_obs", False))
     score = 0.0
     for i in range(games):
         # Half the games from each side, so the arena's own bias cancels instead of

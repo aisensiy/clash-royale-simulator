@@ -34,7 +34,8 @@ def _shard(args):
     act = load_agent(model_path)
     foe = load_agent(opponent_spec)
     env = CREnv(opponent_model=foe,
-                rich_obs=getattr(act, "rich_obs", False) or getattr(foe, "rich_obs", False))
+                rich_obs=getattr(act, "rich_obs", False),
+                opponent_rich_obs=getattr(foe, "rich_obs", False))
     columns = Counter()
     elixir_left, plays, wins, total = [], 0, 0, 0
     for i in range(games):

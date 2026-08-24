@@ -193,3 +193,33 @@ def test_dmg_scale_only_scales_the_shaping_terms():
     # Doing nothing against a random opponent takes damage and deals none, so the
     # shaping is strictly negative and quartering it must move the total up.
     assert rewards[0.25] > rewards[1.0]
+
+
+def test_each_side_can_be_served_a_different_observation():
+    """A rich checkpoint has to be able to face one trained without the extra inputs."""
+    env = CREnv(opponent_model=random_strategy, learner_player=0,
+                rich_obs=True, opponent_rich_obs=False)
+    env.reset(seed=5)
+    assert set(env.observe(0)) == {"grid", "hand", "elixir", "context", "opp_hand"}
+    assert set(env.observe(1)) == {"grid", "hand", "elixir"}
+    # It follows the learner, not the player id: swapping sides swaps who gets what.
+    env.learner_player = 1
+    env.reset(seed=5)
+    assert set(env.observe(1)) == {"grid", "hand", "elixir", "context", "opp_hand"}
+    assert set(env.observe(0)) == {"grid", "hand", "elixir"}
+
+
+def test_pinning_the_side_between_episodes_takes_effect():
+    """`env.learner_player = k` then reset is how every eval tool alternates sides."""
+    env = CREnv(opponent_model=random_strategy)
+    for side in (1, 0, 1):
+        env.learner_player = side
+        env.reset(seed=2)
+        assert env.learner == side
+    # Back to None means a fresh draw each episode, which is what training uses.
+    env.learner_player = None
+    sides = set()
+    for seed in range(30):
+        env.reset(seed=seed)
+        sides.add(env.learner)
+    assert sides == {0, 1}

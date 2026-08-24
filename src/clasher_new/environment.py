@@ -64,7 +64,7 @@ class CREnv(gym.Env):
     def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
                  realtime=True, learner_player=None,
                  record_path=None, record_every=20,
-                 rich_obs=False, dmg_scale=1.0):
+                 rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -78,6 +78,11 @@ class CREnv(gym.Env):
         # a card-counting belief over the opponent's hand. Without these, "hold elixir and
         # punish" is not merely hard to learn -- it is not expressible from the input.
         self.rich_obs = rich_obs
+        # A checkpoint trained without the rich observation cannot be handed one, so a
+        # match between the two encodings needs each side served its own. Follows the
+        # learner rather than the player id, since which side the learner takes changes
+        # between episodes.
+        self.rich_obs_opponent = rich_obs if opponent_rich_obs is None else opponent_rich_obs
         # Weight on the tower-damage shaping terms. At 1.0 the shaping available over a
         # full game (~10.9) rivals the terminal win bonus (10), which pays for constant
         # output regardless of whether the trade was good.
@@ -123,6 +128,12 @@ class CREnv(gym.Env):
         super().reset(seed=seed, options=options)
         if self.learner_player is None:
             self.learner = int(self.np_random.integers(2))
+        else:
+            # The eval tools pin the side per episode (`env.learner_player = i % 2`) and
+            # then reset. Without this, that assignment did nothing and the side stayed
+            # whatever __init__ set it to, so "half the games from each side" was not
+            # actually happening.
+            self.learner = self.learner_player
         # Shuffle through the env's own generator, not the `random` module: otherwise
         # `reset(seed=...)` does not actually determine the episode and anything that
         # depends on the opening hand is quietly irreproducible.
@@ -455,7 +466,8 @@ class CREnv(gym.Env):
             'hand': hand,
             'elixir': np.array([self.battle.players[player_id_observe].elixir], dtype=np.float32)
         }
-        if self.rich_obs:
+        rich = self.rich_obs if player_id_observe == self.learner else self.rich_obs_opponent
+        if rich:
             out['context'] = self._context(player_id_observe)
             out['opp_hand'] = self._opp_hand_belief(player_id_observe)
         return out
