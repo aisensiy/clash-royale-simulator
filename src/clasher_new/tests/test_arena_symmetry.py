@@ -78,9 +78,6 @@ def mirror_pos(p):
 IN_HAND = [c for c in DECK[:4] if c != "Arrows"]
 
 
-@pytest.mark.xfail(reason="known open asymmetry: entity ids 1,2,5 (red) sort ahead of "
-                          "3,4,6 (blue), so nearest-target and collision tie-breaks lean red",
-                   strict=False)
 @pytest.mark.parametrize("card", IN_HAND)
 @pytest.mark.parametrize("spot", [(4, 6), (13, 6), (8, 12)])
 def test_a_unit_walks_the_same_path_on_either_side(card, spot):
@@ -106,7 +103,9 @@ def test_a_unit_walks_the_same_path_on_either_side(card, spot):
     assert worst < 0.05, f"{card}@{spot}: 镜像位置最大偏差 {worst:.3f}"
 
 
-@pytest.mark.xfail(reason="same open asymmetry; this is the end-to-end measure of it",
+@pytest.mark.xfail(reason="residual asymmetry near the river: 115 of 200 mirrored games "
+                          "now stay mirrored to the end, up from 22, but the rest still "
+                          "diverge somewhere around y=15..17",
                    strict=False)
 def test_identical_mirrored_play_leaves_identical_tower_hp():
     """The end-to-end check: same cards, mirrored spots, same times -- towers must match.
@@ -134,9 +133,19 @@ def test_identical_mirrored_play_leaves_identical_tower_hp():
     assert blue == red, f"blue={blue} red_mirrored={red}"
 
 
+def test_battle_uses_the_pathfinder_this_file_tests():
+    """`pathfinding.py` and `pathfinding_heap.py` are near-duplicates and only one is live.
+
+    A symmetry fix was once applied to the unused one and looked green for weeks, so this
+    asserts which module the simulator actually imports.
+    """
+    import battle as battle_module
+    assert battle_module.EntityPathfinder.__module__ == "pathfinding_heap"
+
+
 def test_path_cells_mirror_exactly():
     """cell(size - v) must equal 2*size - 1 - cell(v), boundaries included."""
-    from pathfinding import position_to_cell
+    from pathfinding_heap import position_to_cell
 
     for i in range(ARENA_W * 4 + 1):
         x = i / 4.0
@@ -148,3 +157,26 @@ def test_path_cells_mirror_exactly():
             mx, my = position_to_cell(Position(ARENA_W - x, ARENA_H - y))
             assert (mx, my) == (2 * ARENA_W - 1 - cx, 2 * ARENA_H - 1 - cy), \
                 f"({x},{y}) -> ({cx},{cy}) but mirrored -> ({mx},{my})"
+
+
+def test_a_mirrored_game_is_a_draw_not_a_red_win():
+    """Both kings falling on the same tick used to be scored as a win for red.
+
+    In a game where both sides play the same script in their own frame that is not an
+    edge case: it is the outcome of every game that stays mirrored to the end, so the
+    bias landed on exactly the measurement meant to detect bias.
+    """
+    b = fresh()
+    for entity_id in (5, 6):        # both king towers
+        b.entities[entity_id].hp = 0
+    b.step(1 / 60)
+    assert b.game_over
+    assert b.winner is None, f"simultaneous double knockout scored as a win for {b.winner}"
+
+
+def test_one_king_down_still_decides_the_game():
+    for loser, expected_winner in ((6, 1), (5, 0)):
+        b = fresh()
+        b.entities[loser].hp = 0
+        b.step(1 / 60)
+        assert b.game_over and b.winner == expected_winner

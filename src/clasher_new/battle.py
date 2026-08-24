@@ -544,10 +544,19 @@ class BattleState:
             push_ratio = 0.5
             if y < push_ratio*r: y=push_ratio*r
             elif y > 32-push_ratio*r: y=32-push_ratio*r
-            if x < push_ratio*r: x=r
+            # `x=r` on the low side against `x=18-push_ratio*r` on the high side pushed
+            # mirrored units to positions that are not mirrors of each other.
+            if x < push_ratio*r: x=push_ratio*r
             elif x > 18-push_ratio*r: x=18-push_ratio*r
             if 15-push_ratio*r < y < 17+push_ratio*r and not entity.data.is_air_unit:
-                y = 15-push_ratio*r if y-15 < 17-y else 17+push_ratio*r
+                near, far = 15-push_ratio*r, 17+push_ratio*r
+                if y-15 < 17-y: y = near
+                elif y-15 > 17-y: y = far
+                else:
+                    # Dead centre of the river: pushing everyone the same way is a free
+                    # tile of progress for whichever side that happens to be. Send each
+                    # unit back toward its own half instead.
+                    y = near if entity.player == 0 else far
             entity.position.x = x
             entity.position.y = y
 
@@ -595,7 +604,14 @@ class BattleState:
         p1 = self.players[1].get_crown_count()
         p0h = self.players[0]
         p1h = self.players[1]
-        if p0 == 3:
+        if p0 == 3 and p1 == 3:
+            # Both kings fall on the same tick. Checking p0 first awarded every one of
+            # these to red, and in a mirrored game -- identical policy on both sides --
+            # that is *every* game that plays out symmetrically to the end.
+            self.game_over = True
+            self.winner = None
+            return
+        elif p0 == 3:
             self.game_over = True
             self.winner = 1
             return

@@ -10,9 +10,28 @@ with grid_path.open('r') as f:
 cell_cache = {}
 neighbor_cache = {}
 
+ARENA_W, ARENA_H = 18.0, 32.0
+CELLS_X, CELLS_Y = 36, 64
+
+
+def _axis_to_cell(value, size):
+    """Half-cell index that mirrors correctly about the centre of the arena.
+
+    Plain `floor(2*v)` is not symmetric under `v -> size - v` when `2*v` is an exact
+    integer: the boundary belongs to the cell above it on one side and the cell below it
+    on the other. Every deploy lands on `n + 0.5`, i.e. exactly such a boundary, so two
+    units placed at mirrored spots entered different cells and walked measurably
+    different routes. Snapping boundary values toward the centre makes
+    `cell(size - v) == 2*size - 1 - cell(v)` hold.
+    """
+    scaled = 2 * value
+    if scaled == int(scaled) and value > size / 2:
+        return int(scaled) - 1
+    return math.floor(scaled)
+
+
 def position_to_cell(position: Position):
-    x, y = position.x, position.y
-    return math.floor(2*x), math.floor(2*y)
+    return _axis_to_cell(position.x, ARENA_W), _axis_to_cell(position.y, ARENA_H)
 
 def cell_to_position(cell):
     if cell not in cell_cache:
@@ -20,8 +39,16 @@ def cell_to_position(cell):
         cell_cache[cell] = Position((x+0.5)/2, (y+0.5)/2)
     return cell_cache[cell]
 
-def get_neighboring_points(x, y):
-    if (x, y) in neighbor_cache: return neighbor_cache[(x,y)]
+def get_neighboring_points(x, y, flip=False):
+    """Neighbours of a cell, in an order that mirrors with the arena.
+
+    Which neighbour is visited first decides the parent of any cell reachable at equal
+    cost from two directions. The eight offsets are closed under negation and listed so
+    that negating them reverses the list, so red walking the reflected order produces
+    the reflection of blue's path instead of a different one.
+    """
+    key = (x, y, flip)
+    if key in neighbor_cache: return neighbor_cache[key]
     result = []
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
@@ -29,7 +56,9 @@ def get_neighboring_points(x, y):
             if dx == dy == 0: continue
             if new_x < 0 or new_y < 0 or new_x >= 36 or new_y >= 64: continue
             result.append((new_x, new_y))
-    neighbor_cache[(x,y)] = result
+    if flip:
+        result.reverse()
+    neighbor_cache[key] = result
     return result
 
 
@@ -43,6 +72,16 @@ class EntityPathfinder:
         self.battle = battle_state
         self.goals = set()
         self.goal = None
+        # Every remaining tie in the search is broken by cell coordinates, and plain
+        # coordinates are not preserved by the arena's point reflection: the smallest x
+        # for blue is the largest x for red. Comparing in the acting player's own frame
+        # makes red's search the reflection of blue's rather than a different search
+        # over the same costs.
+        self.flip = (entity.player == 1)
+
+    def _tiebreak(self, cell):
+        x, y = cell
+        return (CELLS_X - 1 - x, CELLS_Y - 1 - y) if self.flip else cell
 
     def heuristic(self, cell):
         x, y = cell
@@ -64,18 +103,28 @@ class EntityPathfinder:
                 if distance < radius+0.375 and self.battle.pathfind_ground_walkable(cell_to_position((x, y)), self.entity.data.collision_radius):
                     self.goals.add((x, y))
         # The second step is to filter goals, only keep the closest one.
-        self.goal = min(self.goals, key=lambda c: cell_to_position(c).distance_to(self.target_position)+cell_to_position(c).distance_to(self.start_position))
+        # Bound once: this is the hot loop, and an attribute lookup plus a method call
+        # per expanded node is measurable.
+        tiebreak = ((lambda c: (CELLS_X - 1 - c[0], CELLS_Y - 1 - c[1])) if self.flip
+                    else (lambda c: c))
+        self.goal = min(self.goals,
+                        key=lambda c: (cell_to_position(c).distance_to(self.target_position)
+                                       + cell_to_position(c).distance_to(self.start_position),
+                                       tiebreak(c)))
 
+        neighbors_of = get_neighboring_points
         g = {}
         f = {}
         parent = {}
         closed_set = set()
         g[self.start_cell] = 0
         f[self.start_cell] = self.heuristic(self.start_cell)
-        open_heap = [(f[self.start_cell], self.start_cell)]
+        # The tie-break sits between the cost and the cell so equal-f nodes come out in
+        # the acting player's frame; heapq would otherwise order them by raw coordinates.
+        open_heap = [(f[self.start_cell], tiebreak(self.start_cell), self.start_cell)]
 
         while open_heap:
-            current_f, current = heapq.heappop(open_heap)
+            current_f, _, current = heapq.heappop(open_heap)
             if current in closed_set:
                 continue
             if current_f > f[current]:
@@ -83,7 +132,7 @@ class EntityPathfinder:
             if current == self.goal:
                 break
             closed_set.add(current)
-            for neighbor in get_neighboring_points(current[0], current[1]):
+            for neighbor in neighbors_of(current[0], current[1], self.flip):
                 if neighbor in closed_set: continue
                 neighbor_position = cell_to_position(neighbor)
                 if not self.battle.pathfind_ground_walkable(neighbor_position, self.entity.data.collision_radius):
@@ -107,7 +156,7 @@ class EntityPathfinder:
                     g[neighbor] = tentative_g
                     parent[neighbor] = current
                     f[neighbor] = g[neighbor] + self.heuristic((nx, ny))
-                    heapq.heappush(open_heap, (f[neighbor], neighbor))
+                    heapq.heappush(open_heap, (f[neighbor], tiebreak(neighbor), neighbor))
         path = [current]
         while path[-1] != self.start_cell:
             path.append(parent[path[-1]])

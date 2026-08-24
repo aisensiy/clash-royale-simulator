@@ -1,3 +1,9 @@
+"""Unused. `battle.py` imports `pathfinding_heap`, which is the live implementation.
+
+Kept because it is upstream's file, but nothing in the simulator loads it -- a symmetry
+fix applied here once looked green for weeks while the real pathfinder was untouched.
+Change `pathfinding_heap.py` instead.
+"""
 from pathlib import Path
 import math
 from core import Position
