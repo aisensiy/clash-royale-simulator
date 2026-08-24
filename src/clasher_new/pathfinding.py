@@ -8,9 +8,27 @@ with grid_path.open('r') as f:
 
 cell_cache = {}
 
+ARENA_W, ARENA_H = 18.0, 32.0
+
+
+def _axis_to_cell(value, size):
+    """Half-cell index that mirrors correctly about the centre of the arena.
+
+    Plain `floor(2*v)` is not symmetric under `v -> size - v` when `2*v` is an exact
+    integer: the boundary belongs to the cell above it on one side and the cell below
+    on the other. Every deploy lands on `n + 0.5`, i.e. exactly such a boundary, so the
+    two players' units entered different path-finding cells from mirrored spots and
+    walked measurably different routes. Snapping boundary values toward the centre
+    makes `cell(size - v) == 2*size - 1 - cell(v)` hold.
+    """
+    scaled = 2 * value
+    if scaled == int(scaled) and value > size / 2:
+        return int(scaled) - 1
+    return math.floor(scaled)
+
+
 def position_to_cell(position: Position):
-    x, y = position.x, position.y
-    return math.floor(2*x), math.floor(2*y)
+    return (_axis_to_cell(position.x, ARENA_W), _axis_to_cell(position.y, ARENA_H))
 
 def cell_to_position(cell):
     if cell not in cell_cache:
