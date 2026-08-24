@@ -103,8 +103,11 @@ def main():
     red, red_name = load_agent(args.red, args.masked)
 
     # Pin the sides so `--blue` really is the blue player in the video and the log.
+    # Each side gets the observation its own checkpoint was trained on; a model handed
+    # keys its network has no input layer for dies on the first prediction.
     env = CREnv(opponent_model=red, visualize=True, realtime=False, learner_player=0,
-                rich_obs=getattr(blue, "rich_obs", False) or getattr(red, "rich_obs", False))
+                rich_obs=getattr(blue, "rich_obs", False),
+                opponent_rich_obs=getattr(red, "rich_obs", False))
     obs, _ = env.reset(seed=args.seed)
 
     frames, log = [], []
