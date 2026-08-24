@@ -212,6 +212,13 @@ def main():
     parser.add_argument("--n-steps", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--total-timesteps", type=int, default=10_000_000)
+    # Upstream settled on lr=1e-4, n_epochs=4, target_kl=0.03 to stabilise training
+    # ("Modify hyperparameters to stabilize training"). Our own late-run Elo swung
+    # 1038 -> 905 -> 1012, which is the same symptom. Exposed as flags rather than new
+    # defaults so a run can be compared against the ones already measured.
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--n-epochs", type=int, default=10)
+    parser.add_argument("--target-kl", type=float, default=None)
     parser.add_argument("--torch-threads", type=int, default=16,
                         help="threads for the gradient update; the rollout forward pass is a\n"
                              "tiny batch, so a large pool here costs more than it buys")
@@ -254,13 +261,16 @@ def main():
         # hyperparameters; only the opponent changes.
         model = algo.load(args.init_from, env=env, device=args.device,
                           n_steps=args.n_steps, batch_size=args.batch_size,
-                          tensorboard_log=args.log_dir)
+                          learning_rate=args.learning_rate, n_epochs=args.n_epochs,
+                          target_kl=args.target_kl, tensorboard_log=args.log_dir)
         print(f"resumed from {args.init_from}", flush=True)
     else:
         model = algo(
             "MultiInputPolicy", env,
             policy_kwargs={"features_extractor_class": CRFeatureExtractor},
             n_steps=args.n_steps, batch_size=args.batch_size,
+            learning_rate=args.learning_rate, n_epochs=args.n_epochs,
+            target_kl=args.target_kl,
             verbose=1, tensorboard_log=args.log_dir, device=args.device, seed=0,
         )
     model.verbose = 1
