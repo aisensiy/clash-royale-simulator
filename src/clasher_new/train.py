@@ -185,7 +185,8 @@ class RandomEvalCallback(BaseCallback):
         return True
 
 
-def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10):
+def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
+             record_path=None, record_every=20):
     def _init():
         # Each worker simulates games in pure Python; a private BLAS thread pool per worker
         # would oversubscribe the box without speeding anything up. This matters twice over
@@ -198,7 +199,8 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10):
             scripts = {"random": random_strategy, "rusher": make_rusher(seed)}
             opponent = PooledOpponent(OpponentPool(pool_dir), scripts, algo,
                                       refresh_every=refresh_every, seed=seed)
-        env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs)
+        env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
+                    record_path=record_path, record_every=record_every)
         env.reset(seed=seed)
         return env
     return _init
@@ -230,13 +232,18 @@ def main():
                         help="timesteps between adding the current policy to the pool")
     parser.add_argument("--opponent-refresh", type=int, default=10,
                         help="episodes a worker keeps one opponent before re-sampling")
+    parser.add_argument("--record-every", type=int, default=0,
+                        help="save one episode in N for exact replay later (0 = off)")
     parser.add_argument("--log-dir", type=str, default="/output/cr_logs")
     args = parser.parse_args()
 
     torch.set_num_threads(args.torch_threads)
 
     pool_dir = os.path.join(args.log_dir, f"{args.run_name}_pool") if args.self_play else None
-    env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh)
+    record_path = (os.path.join(args.log_dir, f"{args.run_name}_episodes")
+                   if args.record_every else None)
+    env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
+                        record_path, args.record_every or 1)
                for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 

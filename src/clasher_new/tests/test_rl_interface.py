@@ -273,10 +273,86 @@ def test_sides_alternate_when_no_side_is_pinned():
 
 
 def test_action_masks_follow_the_learner_side():
-    """Legal placement regions are mirror images, so the egocentric mask must match."""
+    """Legal placement regions are mirror images, so the egocentric mask must match.
+
+    Both envs reset from the same seed, which now fixes the shuffled decks too -- the
+    mask depends on what is in hand, so without that this compares two different hands.
+    """
     masks = {}
     for learner in (0, 1):
         env = CREnv(opponent_model=random_strategy, learner_player=learner)
         env.reset(seed=0)
+        assert env.battle.players[0].cycle == env.battle.players[0].cycle
         masks[learner] = split_mask(env.action_masks())[1]   # the row dimension
     assert list(masks[0]) == list(masks[1])
+
+
+def test_reset_seed_fixes_the_decks():
+    """`reset(seed=n)` must fully determine the episode setup, decks included."""
+    hands = []
+    for _ in range(2):
+        env = CREnv(opponent_model=random_strategy, learner_player=0)
+        env.reset(seed=7)
+        hands.append([p.cycle[:] for p in env.battle.players])
+    assert hands[0] == hands[1]
+
+
+# ------------------------------------------------------------------- episode recording
+
+def _play_one(env, policy):
+    obs, _ = env.reset(seed=11)
+    done = False
+    while not done:
+        obs, _, done, _, _ = env.step(policy(obs))
+    p0, p1 = env.battle.players
+    return (env.battle.winner,
+            (p0.king_tower_hp, p0.left_tower_hp, p0.right_tower_hp),
+            (p1.king_tower_hp, p1.left_tower_hp, p1.right_tower_hp))
+
+
+def test_a_recorded_episode_replays_to_the_same_result(tmp_path):
+    """The whole point of recording: the replay must be the same game, not a similar one."""
+    import json
+    import random as _random
+
+    rng = _random.Random(5)
+    scripted = lambda obs: (rng.randint(0, 4), rng.randint(0, 31), rng.randint(0, 17))
+
+    env = CREnv(opponent_model=scripted, record_path=str(tmp_path), record_every=1)
+    original = _play_one(env, scripted)
+
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1, "each env writes exactly one file"
+    records = [json.loads(line) for line in files[0].read_text().splitlines()]
+    assert len(records) == 1
+
+    replayed_env = CREnv(opponent_model=scripted)
+    b = replayed_env.replay_record(records[0])
+    p0, p1 = b.players
+    replayed = (b.winner,
+                (p0.king_tower_hp, p0.left_tower_hp, p0.right_tower_hp),
+                (p1.king_tower_hp, p1.left_tower_hp, p1.right_tower_hp))
+    assert replayed == original, f"original={original} replayed={replayed}"
+    assert records[0]["outcome"] in (-1, 0, 1)
+    assert len(records[0]["actions"]) > 10
+
+
+def test_recording_samples_one_episode_in_n(tmp_path):
+    import json
+
+    env = CREnv(opponent_model=random_strategy, record_path=str(tmp_path), record_every=3)
+    for _ in range(6):
+        obs, _ = env.reset(seed=0)
+        done = False
+        while not done:
+            obs, _, done, _, _ = env.step(env.action_space.sample())
+    lines = sum(len(f.read_text().splitlines()) for f in tmp_path.iterdir())
+    assert lines == 2, f"6 episodes at one in three should record 2, got {lines}"
+
+
+def test_recording_is_off_by_default(tmp_path):
+    env = CREnv(opponent_model=random_strategy)
+    env.reset(seed=0)
+    env.step((0, 0, 0))
+    assert env._recording is None
+    assert not list(tmp_path.iterdir())

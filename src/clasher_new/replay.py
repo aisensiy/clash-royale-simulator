@@ -37,10 +37,51 @@ def load_agent(spec, masked=False):
     return (lambda obs: model.predict(obs, deterministic=False)[0]), os.path.basename(spec)
 
 
+def replay_recorded(args, imageio):
+    """Re-render a game that actually happened during training.
+
+    No models are loaded: the record carries the decks, the side and every action, and
+    nothing in the simulator draws a random number, so this is the same game frame for
+    frame.
+    """
+    import json
+
+    with open(args.from_record) as fh:
+        records = [json.loads(line) for line in fh if line.strip()]
+    record = records[args.index]
+
+    env = CREnv(opponent_model=lambda obs: (0, 0, 0), visualize=True, realtime=False)
+    frames, tick = [], [0]
+    env.replay_record(record,
+                      frame_hook=lambda vis: attach_capture(vis, frames, tick, args.every))
+
+    outcome = {1: "学习方胜", -1: "学习方负", 0: "平局"}[record["outcome"]]
+    side = "蓝" if record["learner"] == 0 else "红"
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+    imageio.mimsave(args.out, frames, fps=args.fps, macro_block_size=1)
+    print(f"重放第 {args.index} 局：学习方坐{side}方，对手 {record['opponent']}，{outcome}")
+    print(f"共 {len(record['actions'])} 个决策点\n视频 {args.out}（{len(frames)} 帧）")
+
+
+def attach_capture(visualizer, frames, tick, every):
+    """Draw and keep one tick in `every`; painting discarded frames dominated the run."""
+    raw_render = visualizer.render_frame
+
+    def render_and_capture():
+        if tick[0] % every == 0:
+            raw_render()
+            frames.append(np.transpose(pygame.surfarray.array3d(visualizer.screen), (1, 0, 2)))
+        tick[0] += 1
+
+    visualizer.render_frame = render_and_capture
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--blue", required=True, help="checkpoint path, or random/idle/rusher")
-    ap.add_argument("--red", required=True, help="checkpoint path, or random/idle/rusher")
+    ap.add_argument("--blue", help="checkpoint path, or random/idle/rusher")
+    ap.add_argument("--red", help="checkpoint path, or random/idle/rusher")
+    ap.add_argument("--from-record", help="a .jsonl written by --record-every")
+    ap.add_argument("--index", type=int, default=0, help="which episode in that file")
     ap.add_argument("--out", required=True, help="output .mp4")
     ap.add_argument("--every", type=int, default=10,
                     help="draw and keep one tick in N; the sim runs 60 ticks a second")
@@ -51,10 +92,16 @@ def main():
 
     import imageio.v2 as imageio
 
+    if args.from_record:
+        return replay_recorded(args, imageio)
+    if not (args.blue and args.red):
+        raise SystemExit("需要 --blue 和 --red，或者 --from-record")
+
     blue, blue_name = load_agent(args.blue, args.masked)
     red, red_name = load_agent(args.red, args.masked)
 
-    env = CREnv(opponent_model=red, visualize=True, realtime=False)
+    # Pin the sides so `--blue` really is the blue player in the video and the log.
+    env = CREnv(opponent_model=red, visualize=True, realtime=False, learner_player=0)
     obs, _ = env.reset(seed=args.seed)
 
     frames, log = [], []

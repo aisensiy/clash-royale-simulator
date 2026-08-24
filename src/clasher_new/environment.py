@@ -4,7 +4,9 @@ from card_utils import Card
 from core import Position
 
 import gymnasium as gym
-from random import shuffle, randint
+import json
+import os
+from random import randint
 import time
 import numpy as np
 
@@ -58,7 +60,8 @@ _ALL_CELLS = np.ones((ARENA_H, ARENA_W), dtype=bool)
 
 class CREnv(gym.Env):
     def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
-                 realtime=True, learner_player=None):
+                 realtime=True, learner_player=None,
+                 record_path=None, record_every=20):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -83,6 +86,15 @@ class CREnv(gym.Env):
         # win rate it reports.
         self.learner_player = learner_player
         self.learner = 0 if learner_player is None else learner_player
+        # Episode recording. The simulator itself is deterministic -- no module in
+        # battle.py, card_mechanics.py or arena.py draws a random number -- so a game is
+        # fully reproducible from the two decks, which side the learner took, and both
+        # players' actions. Seeds would not be enough: the learner's actions come from one
+        # sampling stream shared across every env in the main process.
+        self.record_path = record_path
+        self.record_every = record_every
+        self._episode_index = -1
+        self._recording = None
         self._deck_0 = DECK[:]
         self._deck_1 = DECK[:]
 
@@ -90,8 +102,16 @@ class CREnv(gym.Env):
         super().reset(seed=seed, options=options)
         if self.learner_player is None:
             self.learner = int(self.np_random.integers(2))
-        shuffle(self._deck_0)
-        shuffle(self._deck_1)
+        # Shuffle through the env's own generator, not the `random` module: otherwise
+        # `reset(seed=...)` does not actually determine the episode and anything that
+        # depends on the opening hand is quietly irreproducible.
+        self._deck_0 = [DECK[i] for i in self.np_random.permutation(len(DECK))]
+        self._deck_1 = [DECK[i] for i in self.np_random.permutation(len(DECK))]
+        self._episode_index += 1
+        self._recording = None
+        if self.record_path and self._episode_index % self.record_every == 0:
+            self._recording = {"deck_0": self._deck_0[:], "deck_1": self._deck_1[:],
+                               "learner": self.learner, "actions": []}
         self.battle = battle.BattleState(player.PlayerState(0, self._deck_0[:], 5.0),
                                          player.PlayerState(1, self._deck_1[:], 5.0))
         if self.visualize:
@@ -120,7 +140,9 @@ class CREnv(gym.Env):
 
     def opponent_action(self):
         opponent = 1 - self.learner
-        self.deploy(opponent, self.opponent(self.observe(opponent)))
+        action = self.opponent(self.observe(opponent))
+        self.deploy(opponent, action)
+        return action
 
     def action_masks(self, player_id=None):
         """Boolean mask over the three action dimensions, concatenated: [slot | y | x].
@@ -190,7 +212,10 @@ class CREnv(gym.Env):
         foe_left = 3-foe.get_crown_count()
 
         self.deploy(self.learner, action)
-        self.opponent_action()
+        opponent_action = self.opponent_action()
+        if self._recording is not None:
+            self._recording["actions"].append(
+                [int(a) for a in action] + [int(a) for a in opponent_action])
         # only make decisions per half second
         for i in range(30):
             if self.battle.game_over:
@@ -220,6 +245,8 @@ class CREnv(gym.Env):
             # Which opponent this episode was against, so win rate can be broken down by
             # opponent type. Against the scripts it is the only non-circular progress signal.
             info["opponent"] = getattr(self.opponent, "label", "script:fixed")
+            if self._recording is not None:
+                self._write_record(info["opponent"])
             info["learner_player"] = self.learner
             info["outcome"] = (0 if self.battle.winner is None else
                                1 if self.battle.winner == self.learner else -1)
@@ -228,6 +255,47 @@ class CREnv(gym.Env):
         # real terminal state with a decided outcome, so the value function must not bootstrap
         # past it. `truncated` stays False; it is not a time limit imposed from outside the MDP.
         return self.observe(self.learner), reward, self.battle.game_over, False, info
+
+    def _write_record(self, opponent_label):
+        """Append one finished episode. Each env writes its own file to avoid contention."""
+        self._recording["opponent"] = opponent_label
+        self._recording["winner"] = self.battle.winner
+        self._recording["outcome"] = (0 if self.battle.winner is None else
+                                      1 if self.battle.winner == self.learner else -1)
+        os.makedirs(self.record_path, exist_ok=True)
+        name = f"episodes_{os.getpid()}.jsonl"
+        with open(os.path.join(self.record_path, name), "a") as fh:
+            fh.write(json.dumps(self._recording, separators=(",", ":")) + "\n")
+        self._recording = None
+
+    def replay_record(self, record, frame_hook=None):
+        """Re-run a recorded episode. Returns the finished BattleState.
+
+        Deterministic by construction: the decks, the side and every action are taken
+        from the record, and nothing else in the simulator draws a random number.
+        """
+        self.learner = record["learner"]
+        self.battle = battle.BattleState(player.PlayerState(0, record["deck_0"][:], 5.0),
+                                         player.PlayerState(1, record["deck_1"][:], 5.0))
+        if self.visualize:
+            self.visualizer = Visualizer(self.battle)
+            if frame_hook is not None:
+                # The visualizer only exists once the battle does, so the capture hook
+                # has to be attached here rather than by the caller beforehand.
+                frame_hook(self.visualizer)
+        opponent = 1 - self.learner
+        for row in record["actions"]:
+            if self.battle.game_over:
+                break
+            self.deploy(self.learner, row[:3])
+            self.deploy(opponent, row[3:])
+            for _ in range(30):
+                if self.battle.game_over:
+                    break
+                self.battle.step(1 / 60)
+                if self.visualizer:
+                    self.visualizer.render_frame()
+        return self.battle
 
     def observe(self, player_id_observe=0):
         """Gives an egocentric representation of the game state.
