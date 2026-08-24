@@ -22,16 +22,20 @@ def _mirror_shard(args):
     act = lambda obs: model.predict(obs, deterministic=False)[0]
     env = CREnv(opponent_model=act)
     blue = red = draw = 0
+    learner_wins = learner_games = 0
     for i in range(games):
         obs, _ = env.reset(seed=seed * 10_000 + i)
         done = False
+        info = {}
         while not done:
-            obs, _, done, _, _ = env.step(act(obs))
+            obs, _, done, _, info = env.step(act(obs))
         winner = env.battle.winner
         blue += winner == 0
         red += winner == 1
         draw += winner is None
-    return blue, red, draw
+        learner_games += 1
+        learner_wins += info.get("outcome") == 1
+    return blue, red, draw, learner_wins, learner_games
 
 
 def mirror_match(model_path, games=200, workers=20):
@@ -39,13 +43,14 @@ def mirror_match(model_path, games=200, workers=20):
     jobs = [(model_path, shard, s) for s in range(workers)]
     with ProcessPoolExecutor(max_workers=workers) as ex:
         out = list(ex.map(_mirror_shard, jobs))
-    return (sum(b for b, _, _ in out), sum(r for _, r, _ in out), sum(d for _, _, d in out))
+    return tuple(sum(col) for col in zip(*out))
 
 
 if __name__ == "__main__":
     path = sys.argv[1]
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 200
-    blue, red, draw = mirror_match(path, games=n)
+    blue, red, draw, lw, lg = mirror_match(path, games=n)
     total = blue + red + draw
     print(f"同一个模型自己打自己 {total} 局：蓝 {blue} 胜 / 红 {red} 胜 / {draw} 平")
-    print(f"蓝方胜率 {blue/total:.1%}  —— 对称的话应该在 50% 附近")
+    print(f"按颜色看，蓝方胜率 {blue/total:.1%}  —— 这里的偏差是环境本身的")
+    print(f"按学习方看，胜率 {lw/lg:.1%}  —— 两边轮流打之后应该在 50% 附近")

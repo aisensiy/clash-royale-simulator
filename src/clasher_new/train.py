@@ -131,7 +131,11 @@ class OpponentOutcomeCallback(BaseCallback):
         for info in self.locals.get("infos", []):
             if "outcome" not in info:
                 continue
-            for key in (info["opponent"], info["opponent"].split(":")[0]):
+            # Track the side as well. The agent now plays both, so a persistent gap
+            # between the two rows is what remains of the arena's own bias.
+            keys = (info["opponent"], info["opponent"].split(":")[0],
+                    f"as_{'blue' if info['learner_player'] == 0 else 'red'}")
+            for key in keys:
                 buf = self.history.setdefault(key, [])
                 buf.append(info["outcome"])
                 if len(buf) > self.window:

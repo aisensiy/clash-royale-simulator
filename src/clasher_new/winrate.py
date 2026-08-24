@@ -64,9 +64,12 @@ def play(args):
         from stable_baselines3 import PPO as Algo
     model = Algo.load(model_path, device="cpu")
 
+    # Sides alternate: with an arena that favours red, a blue-only measurement reads
+    # several points low and is not comparable to anything measured the other way.
     env = CREnv(opponent_model=OPPONENTS[opp_name], legacy_obs=cfg["legacy_obs"])
     wins = losses = draws = 0
     for ep in range(n_episodes):
+        env.learner_player = ep % 2
         obs, _ = env.reset(seed=seed * 1000 + ep)
         done = False
         while not done:
@@ -76,17 +79,17 @@ def play(args):
             else:
                 action, _ = model.predict(obs, deterministic=deterministic)
             obs, _, done, _, _ = env.step(action)
-        p0, p1 = env.battle.players
-        # `winner` is only set when a king tower falls or the 300s rule decides it;
-        # compare crowns first so a timeout with a crown lead still counts as a win.
-        c0, c1 = p0.get_crown_count(), p1.get_crown_count()
-        if c1 > c0:
+        me, foe = env.learner, 1 - env.learner
+        players = env.battle.players
+        # Compare crowns first so a timeout with a crown lead still counts as a win.
+        mine, theirs = players[me].get_crown_count(), players[foe].get_crown_count()
+        if theirs > mine:
             wins += 1
-        elif c0 > c1:
+        elif mine > theirs:
             losses += 1
-        elif env.battle.winner == 0:
+        elif env.battle.winner == me:
             wins += 1
-        elif env.battle.winner == 1:
+        elif env.battle.winner == foe:
             losses += 1
         else:
             draws += 1

@@ -58,7 +58,7 @@ _ALL_CELLS = np.ones((ARENA_H, ARENA_W), dtype=bool)
 
 class CREnv(gym.Env):
     def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
-                 realtime=True):
+                 realtime=True, learner_player=None):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -77,11 +77,19 @@ class CREnv(gym.Env):
         self.visualizer = None
         # Watching live wants wall-clock pacing; recording a file does not.
         self.realtime = realtime
+        # Which side the agent plays. None means a fresh draw each episode: the arena is
+        # not perfectly symmetric (an identical policy wins only 40% as blue), so an agent
+        # pinned to one side both learns half the game and has that bias baked into every
+        # win rate it reports.
+        self.learner_player = learner_player
+        self.learner = 0 if learner_player is None else learner_player
         self._deck_0 = DECK[:]
         self._deck_1 = DECK[:]
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed, options=options)
+        if self.learner_player is None:
+            self.learner = int(self.np_random.integers(2))
         shuffle(self._deck_0)
         shuffle(self._deck_1)
         self.battle = battle.BattleState(player.PlayerState(0, self._deck_0[:], 5.0),
@@ -91,19 +99,30 @@ class CREnv(gym.Env):
         # Self-play opponents rotate between episodes; scripted ones have no hook.
         if hasattr(self.opponent, "on_episode_start"):
             self.opponent.on_episode_start()
-        return self.observe(0), {}
+        return self.observe(self.learner), {}
+
+    def deploy(self, player_id, action):
+        """Place a card from `player_id`'s own point of view.
+
+        Actions are egocentric, matching the observation: row 0 is always the near edge
+        of the acting player's half. For player 1 that means reflecting through the
+        centre of the arena to get absolute coordinates.
+        """
+        slot, y, x = action
+        if slot == 0:
+            return False
+        card_name = self.battle.players[player_id].cycle[slot - 1]
+        if player_id == 0:
+            pos = Position(x + 0.5, y + 0.5)
+        else:
+            pos = Position(ARENA_W - (x + 0.5), ARENA_H - (y + 0.5))
+        return self.battle.deploy_card(player_id, card_name, pos)
 
     def opponent_action(self):
-        obs1 = self.observe(1)
-        opponent_action = self.opponent(obs1)
-        slot, y, x = opponent_action
-        p1 = self.battle.players[1]
-        if slot != 0:
-            card_name = p1.cycle[slot - 1]
-            self.battle.deploy_card(1, card_name, Position(18-(x+0.5), 32-(y+0.5)))
-            # Yes, this transformation seems weird, but it should be correct
+        opponent = 1 - self.learner
+        self.deploy(opponent, self.opponent(self.observe(opponent)))
 
-    def action_masks(self, player_id=0):
+    def action_masks(self, player_id=None):
         """Boolean mask over the three action dimensions, concatenated: [slot | y | x].
 
         MultiDiscrete masks are per-dimension, so a joint constraint ("this card may go
@@ -111,6 +130,8 @@ class CREnv(gym.Env):
         currently playable card. Elixir, which accounts for the overwhelming majority of
         rejected actions, *is* masked exactly because it depends only on the slot.
         """
+        if player_id is None:
+            player_id = self.learner
         p = self.battle.players[player_id]
         enemy = self.battle.players[1 - player_id]
 
@@ -136,7 +157,10 @@ class CREnv(gym.Env):
                 legal |= _TROOP_NEEDS_LEFT
             if enemy.right_tower_hp <= 0:
                 legal |= _TROOP_NEEDS_RIGHT
-            legal = legal & ~self._building_cells()
+            blocked = self._building_cells()
+            if player_id == 1:
+                blocked = blocked[::-1, ::-1]  # the mask is built in player 0's frame
+            legal = legal & ~blocked
 
         return np.concatenate([slot_mask, legal.any(axis=1), legal.any(axis=0)])
 
@@ -158,17 +182,14 @@ class CREnv(gym.Env):
         The opponent is a function that takes in the observation and outputs the action tuple.
         """
 
-        p0, p1 = self.battle.players
-        blue_hps_old = p0.king_tower_hp+p0.left_tower_hp+p0.right_tower_hp
-        red_hps_old = p1.king_tower_hp+p1.left_tower_hp+p1.right_tower_hp
-        blue_left = 3-p0.get_crown_count()
-        red_left = 3-p1.get_crown_count()
+        me = self.battle.players[self.learner]
+        foe = self.battle.players[1 - self.learner]
+        my_hps_old = me.king_tower_hp+me.left_tower_hp+me.right_tower_hp
+        foe_hps_old = foe.king_tower_hp+foe.left_tower_hp+foe.right_tower_hp
+        my_left = 3-me.get_crown_count()
+        foe_left = 3-foe.get_crown_count()
 
-        slot, y, x = action
-        if slot != 0:
-            card_name = p0.cycle[slot-1]
-            self.battle.deploy_card(0, card_name, Position(x+0.5, y+0.5))
-
+        self.deploy(self.learner, action)
         self.opponent_action()
         # only make decisions per half second
         for i in range(30):
@@ -180,16 +201,17 @@ class CREnv(gym.Env):
                 self.visualizer.render_frame()
                 if self.realtime:
                     time.sleep(1/60)
-        blue_hps_new = p0.king_tower_hp+p0.left_tower_hp+p0.right_tower_hp
-        red_hps_new = p1.king_tower_hp+p1.left_tower_hp+p1.right_tower_hp
-        blue_left_new = 3-p0.get_crown_count()
-        red_left_new = 3-p1.get_crown_count()
+        my_hps_new = me.king_tower_hp+me.left_tower_hp+me.right_tower_hp
+        foe_hps_new = foe.king_tower_hp+foe.left_tower_hp+foe.right_tower_hp
+        my_left_new = 3-me.get_crown_count()
+        foe_left_new = 3-foe.get_crown_count()
 
-        reward = 5*(red_left-red_left_new)-5*(blue_left-blue_left_new)+0.001*(red_hps_old-red_hps_new)-0.0012*(blue_hps_old-blue_hps_new)
+        reward = (5*(foe_left-foe_left_new) - 5*(my_left-my_left_new)
+                  + 0.001*(foe_hps_old-foe_hps_new) - 0.0012*(my_hps_old-my_hps_new))
         if self.battle.game_over:
-            if self.battle.winner == 0:
+            if self.battle.winner == self.learner:
                 reward += 10
-            elif self.battle.winner == 1:
+            elif self.battle.winner is not None:
                 reward -= 10
             # winner is None on an exact tiebreak draw: no terminal bonus either way.
 
@@ -198,13 +220,14 @@ class CREnv(gym.Env):
             # Which opponent this episode was against, so win rate can be broken down by
             # opponent type. Against the scripts it is the only non-circular progress signal.
             info["opponent"] = getattr(self.opponent, "label", "script:fixed")
-            info["outcome"] = (1 if self.battle.winner == 0 else
-                               -1 if self.battle.winner == 1 else 0)
+            info["learner_player"] = self.learner
+            info["outcome"] = (0 if self.battle.winner is None else
+                               1 if self.battle.winner == self.learner else -1)
 
         # Every way this game ends -- king tower down, sudden death, or the 300s rule -- is a
         # real terminal state with a decided outcome, so the value function must not bootstrap
         # past it. `truncated` stays False; it is not a time limit imposed from outside the MDP.
-        return self.observe(0), reward, self.battle.game_over, False, info
+        return self.observe(self.learner), reward, self.battle.game_over, False, info
 
     def observe(self, player_id_observe=0):
         """Gives an egocentric representation of the game state.

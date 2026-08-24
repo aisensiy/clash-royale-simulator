@@ -44,12 +44,15 @@ def play_match(args):
     env = CREnv(opponent_model=load_agent(red_spec, masked))
     score = 0.0
     for i in range(games):
+        # Half the games from each side, so the arena's own bias cancels instead of
+        # being credited to whoever happened to be drawn as blue.
+        env.learner_player = i % 2
         obs, _ = env.reset(seed=seed * 1000 + i)
         done = False
         while not done:
             obs, _, done, _, _ = env.step(blue(obs))
         winner = env.battle.winner
-        score += 1.0 if winner == 0 else 0.0 if winner == 1 else 0.5
+        score += 1.0 if winner == env.learner else 0.0 if winner is not None else 0.5
     return blue_spec, red_spec, score, games
 
 

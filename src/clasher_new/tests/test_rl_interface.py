@@ -221,3 +221,62 @@ def test_lowest_tower_loses_the_tiebreak():
         env.battle.step(1 / 60)
         assert env.battle.winner == expected_winner, \
             f"player {damaged} holds the weakest tower and must lose"
+
+
+# ------------------------------------------------------------------- playing either side
+
+def test_deploy_from_player_1_lands_at_the_mirrored_spot():
+    """Actions are egocentric for both players, so player 1's must be reflected."""
+    env = attach()
+    env.learner = 1
+    assert env.deploy(1, (1, 6, 4))          # slot 1, row 6, column 4 in red's own frame
+    unit = next(e for e in env.battle.entities.values()
+                if e.player == 1 and e.name == env.battle.players[1].cycle[-1])
+    assert (round(unit.position.x, 1), round(unit.position.y, 1)) == (ARENA_W - 4.5, ARENA_H - 6.5)
+
+
+def test_reward_is_signed_from_the_learner_side():
+    """Destroying the opponent's tower must pay out the same whichever side you are."""
+    for learner in (0, 1):
+        env = CREnv(opponent_model=lambda obs: (0, 0, 0), learner_player=learner)
+        env.reset(seed=0)
+        env.battle.entities[1 if learner == 0 else 3].hp = 1  # a foe princess tower
+        total = 0.0
+        for _ in range(60):
+            _, reward, done, _, info = env.step((0, 0, 0))
+            total += reward
+            if done:
+                break
+        assert total > 0, f"learner={learner} took the enemy tower but scored {total}"
+
+
+def test_outcome_flag_matches_the_learner_side():
+    for learner in (0, 1):
+        env = CREnv(opponent_model=lambda obs: (0, 0, 0), learner_player=learner)
+        env.reset(seed=1)
+        env.battle.time = 300.0
+        env.battle.entities[1 if learner == 0 else 3].hp = 1
+        done = False
+        info = {}
+        while not done:
+            _, _, done, _, info = env.step((0, 0, 0))
+        assert info["outcome"] == 1, f"learner={learner} should be recorded as the winner"
+
+
+def test_sides_alternate_when_no_side_is_pinned():
+    env = CREnv(opponent_model=random_strategy)
+    seen = set()
+    for seed in range(30):
+        env.reset(seed=seed)
+        seen.add(env.learner)
+    assert seen == {0, 1}, "an unpinned env must draw both sides"
+
+
+def test_action_masks_follow_the_learner_side():
+    """Legal placement regions are mirror images, so the egocentric mask must match."""
+    masks = {}
+    for learner in (0, 1):
+        env = CREnv(opponent_model=random_strategy, learner_player=learner)
+        env.reset(seed=0)
+        masks[learner] = split_mask(env.action_masks())[1]   # the row dimension
+    assert list(masks[0]) == list(masks[1])
