@@ -16,7 +16,7 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 import numpy as np
 import pygame
 
-from environment import CREnv, random_strategy
+from environment import CREnv, random_strategy, rich_obs_for
 from winrate import idle_strategy, make_rusher
 
 SCRIPTS = {"random": random_strategy, "idle": idle_strategy, "rusher": make_rusher()}
@@ -34,7 +34,9 @@ def load_agent(spec, masked=False):
     else:
         from stable_baselines3 import PPO as Algo
     model = Algo.load(spec, device="cpu")
-    return (lambda obs: model.predict(obs, deterministic=False)[0]), os.path.basename(spec)
+    act = lambda obs: model.predict(obs, deterministic=False)[0]
+    act.rich_obs = rich_obs_for(model)
+    return act, os.path.basename(spec)
 
 
 def replay_recorded(args, imageio):
@@ -101,7 +103,8 @@ def main():
     red, red_name = load_agent(args.red, args.masked)
 
     # Pin the sides so `--blue` really is the blue player in the video and the log.
-    env = CREnv(opponent_model=red, visualize=True, realtime=False, learner_player=0)
+    env = CREnv(opponent_model=red, visualize=True, realtime=False, learner_player=0,
+                rich_obs=getattr(blue, "rich_obs", False) or getattr(red, "rich_obs", False))
     obs, _ = env.reset(seed=args.seed)
 
     frames, log = [], []

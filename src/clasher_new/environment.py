@@ -25,6 +25,8 @@ speed_types = [0, 0.75, 1.0, 1.5]
 
 ARENA_H, ARENA_W = 32, 18
 N_SLOTS = 5  # slot 0 is "do nothing", slots 1..4 are the four cards in hand
+N_CONTEXT = 8  # see CREnv.observe: the scalars a human reads off the screen
+KING_TOWER_HP = 4824
 
 
 def _base_troop_legality():
@@ -61,7 +63,8 @@ _ALL_CELLS = np.ones((ARENA_H, ARENA_W), dtype=bool)
 class CREnv(gym.Env):
     def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
                  realtime=True, learner_player=None,
-                 record_path=None, record_every=20):
+                 record_path=None, record_every=20,
+                 rich_obs=False, dmg_scale=1.0):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -69,11 +72,25 @@ class CREnv(gym.Env):
         self.legacy_obs = legacy_obs
         self.battle: battle.BattleState = None
         self.speed = speed
-        self.observation_space = gym.spaces.Dict({
+        # `rich_obs` adds everything a human sees but the original encoding left out:
+        # the opponent's elixir, the clock (which also sets the elixir rate), both crown
+        # counts, both sides' weakest tower (the 300s tiebreak compares exactly that), and
+        # a card-counting belief over the opponent's hand. Without these, "hold elixir and
+        # punish" is not merely hard to learn -- it is not expressible from the input.
+        self.rich_obs = rich_obs
+        # Weight on the tower-damage shaping terms. At 1.0 the shaping available over a
+        # full game (~10.9) rivals the terminal win bonus (10), which pays for constant
+        # output regardless of whether the trade was good.
+        self.dmg_scale = dmg_scale
+        spaces = {
             "grid": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(ARENA_H, ARENA_W, 15), dtype=np.float32),
             "hand": gym.spaces.Box(low=0, high=len(entity_names) - 1, shape=(5,), dtype=np.int32),
-            "elixir": gym.spaces.Box(low=0.0, high=10.0, shape=(1,), dtype=np.float32)
-        })
+            "elixir": gym.spaces.Box(low=0.0, high=10.0, shape=(1,), dtype=np.float32),
+        }
+        if rich_obs:
+            spaces["context"] = gym.spaces.Box(low=0.0, high=1.0, shape=(N_CONTEXT,), dtype=np.float32)
+            spaces["opp_hand"] = gym.spaces.Box(low=0.0, high=1.0, shape=(len(DECK),), dtype=np.float32)
+        self.observation_space = gym.spaces.Dict(spaces)
         self.action_space = gym.spaces.MultiDiscrete([N_SLOTS, ARENA_H, ARENA_W])
 
         self.visualize = visualize
@@ -97,6 +114,10 @@ class CREnv(gym.Env):
         self._recording = None
         self._deck_0 = DECK[:]
         self._deck_1 = DECK[:]
+        # Cards each player has been *seen* playing, in order. This is public information:
+        # a card that is played goes to the back of its owner's cycle, so every play pins
+        # down one more position. See `_opp_hand_belief`.
+        self._plays = [[], []]
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed, options=options)
@@ -108,6 +129,7 @@ class CREnv(gym.Env):
         self._deck_0 = [DECK[i] for i in self.np_random.permutation(len(DECK))]
         self._deck_1 = [DECK[i] for i in self.np_random.permutation(len(DECK))]
         self._episode_index += 1
+        self._plays = [[], []]
         self._recording = None
         if self.record_path and self._episode_index % self.record_every == 0:
             self._recording = {"deck_0": self._deck_0[:], "deck_1": self._deck_1[:],
@@ -136,7 +158,10 @@ class CREnv(gym.Env):
             pos = Position(x + 0.5, y + 0.5)
         else:
             pos = Position(ARENA_W - (x + 0.5), ARENA_H - (y + 0.5))
-        return self.battle.deploy_card(player_id, card_name, pos)
+        played = self.battle.deploy_card(player_id, card_name, pos)
+        if played:
+            self._plays[player_id].append(card_name)
+        return played
 
     def opponent_action(self):
         opponent = 1 - self.learner
@@ -186,6 +211,76 @@ class CREnv(gym.Env):
 
         return np.concatenate([slot_mask, legal.any(axis=1), legal.any(axis=0)])
 
+    def _known_cycle_tail(self, player_id):
+        """The suffix of `player_id`'s cycle that a spectator can pin down exactly.
+
+        Playing a card sends it to the back of the cycle, so the cards that have been
+        played, ordered by their most recent play, occupy the last positions -- and every
+        card never played is somewhere ahead of all of them.
+        """
+        tail = []
+        for name in self._plays[player_id]:
+            if name in tail:
+                tail.remove(name)
+            tail.append(name)
+        return tail
+
+    def _opp_hand_belief(self, observer):
+        """P(card is in the opponent's hand right now), from public information only.
+
+        This is card counting, and it is what a human actually knows: at the start every
+        one of the eight cards is equally likely to be among the four in hand (0.5), and
+        each play the opponent makes fixes one more position until the hand is known
+        exactly. Cards the opponent has never played stay ambiguous -- the belief is
+        uniform over their unknown ordering, which ignores the (small) information leaked
+        by *which* card the opponent chose to play. That is the same approximation a
+        human makes.
+        """
+        opponent = 1 - observer
+        tail = self._known_cycle_tail(opponent)
+        belief = np.zeros(len(DECK), dtype=np.float32)
+        unseen = [c for c in DECK if c not in tail]
+        if len(unseen) >= 4:
+            # The hand is four of the `unseen` cards, whose order is unknown.
+            p = 4.0 / len(unseen)
+            for c in unseen:
+                belief[DECK.index(c)] = p
+        else:
+            # Fewer than four cards left unplayed: all of them are in hand, and the rest
+            # of the hand is the front of the known tail.
+            for c in unseen:
+                belief[DECK.index(c)] = 1.0
+            for c in tail[:4 - len(unseen)]:
+                belief[DECK.index(c)] = 1.0
+        return belief
+
+    def _context(self, observer):
+        me = self.battle.players[observer]
+        foe = self.battle.players[1 - observer]
+        t = self.battle.time
+        # Elixir generation triples over the course of a game; the agent cannot pace its
+        # spending without knowing which phase it is in.
+        rate_tier = 0.0 if t < 120 else 0.5 if t < 240 else 1.0
+        # Between 180s and 300s a one-crown lead ends the game immediately.
+        sudden_death = 1.0 if 180 <= t < 300 else 0.0
+
+        def weakest(p):
+            live = [h for h in (p.king_tower_hp, p.left_tower_hp, p.right_tower_hp) if h > 0]
+            return (min(live) / KING_TOWER_HP) if live else 0.0
+
+        return np.array([
+            foe.elixir / 10.0,
+            min(t / 300.0, 1.0),
+            rate_tier,
+            sudden_death,
+            me.get_crown_count() / 3.0,
+            foe.get_crown_count() / 3.0,
+            # At 300s every surviving tower drains at once and the single weakest one
+            # falls first, so these two numbers *are* the tiebreak.
+            weakest(me),
+            weakest(foe),
+        ], dtype=np.float32)
+
     def _building_cells(self):
         """Cells whose centre overlaps a live building footprint (towers included)."""
         blocked = np.zeros((ARENA_H, ARENA_W), dtype=bool)
@@ -232,7 +327,8 @@ class CREnv(gym.Env):
         foe_left_new = 3-foe.get_crown_count()
 
         reward = (5*(foe_left-foe_left_new) - 5*(my_left-my_left_new)
-                  + 0.001*(foe_hps_old-foe_hps_new) - 0.0012*(my_hps_old-my_hps_new))
+                  + self.dmg_scale*(0.001*(foe_hps_old-foe_hps_new)
+                                    - 0.0012*(my_hps_old-my_hps_new)))
         if self.battle.game_over:
             if self.battle.winner == self.learner:
                 reward += 10
@@ -275,6 +371,7 @@ class CREnv(gym.Env):
         from the record, and nothing else in the simulator draws a random number.
         """
         self.learner = record["learner"]
+        self._plays = [[], []]
         self.battle = battle.BattleState(player.PlayerState(0, record["deck_0"][:], 5.0),
                                          player.PlayerState(1, record["deck_1"][:], 5.0))
         if self.visualize:
@@ -344,11 +441,26 @@ class CREnv(gym.Env):
         hand = np.array([entity_names.index(each) for each in self.battle.players[player_id_observe].cycle[:5]],
                         dtype=np.int32)
 
-        return {
+        out = {
             'grid': obs,
             'hand': hand,
             'elixir': np.array([self.battle.players[player_id_observe].elixir], dtype=np.float32)
         }
+        if self.rich_obs:
+            out['context'] = self._context(player_id_observe)
+            out['opp_hand'] = self._opp_hand_belief(player_id_observe)
+        return out
+
+
+def rich_obs_for(model):
+    """Whether an env has to produce the rich observation for this loaded checkpoint.
+
+    Read off the saved observation space rather than passed around by hand: the eval
+    tools load checkpoints from several different runs and getting this wrong is a shape
+    error at best and a silently wrong measurement at worst.
+    """
+    space = getattr(model, "observation_space", None)
+    return "context" in getattr(space, "spaces", {})
 
 
 def random_strategy(observation):

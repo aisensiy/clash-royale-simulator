@@ -24,6 +24,17 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim)
         self.embedding_dim = 8
         self.entity_embedding = nn.Embedding(len(entity_names), self.embedding_dim)
+        # The rich observation adds a handful of scalars (clock, crowns, opponent elixir,
+        # weakest towers, card-counting belief). Concatenating 16 numbers straight onto a
+        # ~2300-wide CNN feature would let them be ignored; a small MLP gives them a
+        # comparable share of the head's input.
+        extra = 0
+        spaces_ = observation_space.spaces
+        if "context" in spaces_:
+            extra = spaces_["context"].shape[0] + spaces_["opp_hand"].shape[0]
+        self.context_dim = 64 if extra else 0
+        self.context_mlp = (nn.Sequential(nn.Linear(extra, 64), nn.ReLU())
+                            if extra else None)
         self.in_channels = 13 + self.embedding_dim + 4
         self.cnn = nn.Sequential(
             nn.Conv2d(self.in_channels, 32, 3, padding=1), nn.ReLU(),
@@ -34,7 +45,8 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         with torch.no_grad():
             dummy = torch.zeros(1, self.in_channels, 32, 18)
             cnn_out = self.cnn(dummy).shape[1]
-        self.fc = nn.Linear(cnn_out + 5 * self.embedding_dim + 1, features_dim)
+        self.fc = nn.Linear(cnn_out + 5 * self.embedding_dim + 1 + self.context_dim,
+                            features_dim)
 
     def forward(self, observation):
         """
@@ -59,8 +71,12 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         grid_feat = self.cnn(x)
 
         hand_feat = self.entity_embedding(hand).flatten(1)  # (B, 5*EMBED)
-        combined = torch.cat([grid_feat, hand_feat, elixir.float()], dim=1)
-        return torch.relu(self.fc(combined))
+        parts = [grid_feat, hand_feat, elixir.float()]
+        if self.context_mlp is not None:
+            ctx = torch.cat([observation['context'].float(),
+                             observation['opp_hand'].float()], dim=1)
+            parts.append(self.context_mlp(ctx))
+        return torch.relu(self.fc(torch.cat(parts, dim=1)))
 
 
 class ThroughputCallback(BaseCallback):
@@ -156,12 +172,14 @@ class RandomEvalCallback(BaseCallback):
     # Evaluation runs episodes in a single un-vectorised env, so each call costs roughly
     # `n_episodes * 370` sequential env steps. At 100k/20 that was eating about as much
     # wall clock as the training it was measuring; 500k/10 brings it under 10%.
-    def __init__(self, every=500_000, n_episodes=10, use_masking=True, legacy_obs=False, verbose=0):
+    def __init__(self, every=500_000, n_episodes=10, use_masking=True, legacy_obs=False,
+                 rich_obs=False, verbose=0):
         super().__init__(verbose)
         self.every = every
         self.n_episodes = n_episodes
         self.use_masking = use_masking
         self.legacy_obs = legacy_obs
+        self.rich_obs = rich_obs
         self._next = None
 
     def _on_training_start(self):
@@ -172,7 +190,8 @@ class RandomEvalCallback(BaseCallback):
             return True
         self._next += self.every
         eval_env = DummyVecEnv([lambda: CREnv(opponent_model=random_strategy,
-                                              legacy_obs=self.legacy_obs)])
+                                              legacy_obs=self.legacy_obs,
+                                              rich_obs=self.rich_obs)])
         if self.use_masking:
             mean_reward, _ = maskable_evaluate_policy(
                 self.model, eval_env, n_eval_episodes=self.n_episodes,
@@ -186,7 +205,7 @@ class RandomEvalCallback(BaseCallback):
 
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
-             record_path=None, record_every=20):
+             record_path=None, record_every=20, rich_obs=False, dmg_scale=1.0):
     def _init():
         # Each worker simulates games in pure Python; a private BLAS thread pool per worker
         # would oversubscribe the box without speeding anything up. This matters twice over
@@ -200,7 +219,8 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
             opponent = PooledOpponent(OpponentPool(pool_dir), scripts, algo,
                                       refresh_every=refresh_every, seed=seed)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
-                    record_path=record_path, record_every=record_every)
+                    record_path=record_path, record_every=record_every,
+                    rich_obs=rich_obs, dmg_scale=dmg_scale)
         env.reset(seed=seed)
         return env
     return _init
@@ -231,6 +251,17 @@ def main():
                         help="use MaskablePPO and forbid unaffordable or illegal actions")
     parser.add_argument("--legacy-obs", action="store_true",
                         help="ablation: reproduce the mirrored-observation bug")
+    # On by default from here: without the clock, the crowns and the opponent's elixir,
+    # "hold elixir and counter-push" cannot be represented at all, and every checkpoint so
+    # far measured exactly 0% on the elixir-management probe.
+    parser.add_argument("--no-rich-obs", dest="rich_obs", action="store_false",
+                        help="ablation: drop the clock/crowns/opponent-elixir/card-count inputs")
+    parser.set_defaults(rich_obs=True)
+    # Full tower damage is worth ~10.9 of shaping reward per game against a terminal win
+    # bonus of 10, so trading badly still pays as long as something is being hit. Quartered,
+    # the shaping keeps its role as a dense learning signal without outweighing the result.
+    parser.add_argument("--dmg-scale", type=float, default=0.25,
+                        help="multiplier on both tower-damage shaping terms (1.0 = legacy)")
     parser.add_argument("--init-from", type=str, default=None,
                         help="continue from an existing checkpoint instead of a fresh policy")
     parser.add_argument("--self-play", action="store_true",
@@ -250,7 +281,8 @@ def main():
     record_path = (os.path.join(args.log_dir, f"{args.run_name}_episodes")
                    if args.record_every else None)
     env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
-                        record_path, args.record_every or 1)
+                        record_path, args.record_every or 1,
+                        rich_obs=args.rich_obs, dmg_scale=args.dmg_scale)
                for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 
@@ -287,7 +319,8 @@ def main():
         callbacks += [SnapshotCallback(pool, args.snapshot_every, verbose=1),
                       OpponentOutcomeCallback()]
     else:
-        callbacks.append(RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs))
+        callbacks.append(RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs,
+                                            rich_obs=args.rich_obs))
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
                     tb_log_name=args.run_name, reset_num_timesteps=False)

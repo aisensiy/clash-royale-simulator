@@ -15,7 +15,7 @@ import numpy as np
 
 from card_utils import Card
 from core import Position
-from environment import ARENA_H, ARENA_W, CREnv, N_SLOTS, random_strategy
+from environment import ARENA_H, ARENA_W, CREnv, N_SLOTS, random_strategy, rich_obs_for
 
 RUNS = {
     "legacy_nomask": dict(legacy_obs=True, masked=False),
@@ -66,7 +66,8 @@ def play(args):
 
     # Sides alternate: with an arena that favours red, a blue-only measurement reads
     # several points low and is not comparable to anything measured the other way.
-    env = CREnv(opponent_model=OPPONENTS[opp_name], legacy_obs=cfg["legacy_obs"])
+    env = CREnv(opponent_model=OPPONENTS[opp_name], legacy_obs=cfg["legacy_obs"],
+                rich_obs=rich_obs_for(model))
     wins = losses = draws = 0
     for ep in range(n_episodes):
         env.learner_player = ep % 2
@@ -98,14 +99,28 @@ def play(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("root")
+    ap.add_argument("root", nargs="?", default=".")
     ap.add_argument("--episodes", type=int, default=100)
     ap.add_argument("--workers", type=int, default=32)
+    ap.add_argument("--model", action="append", default=[], metavar="NAME=PATH",
+                    help="evaluate an arbitrary checkpoint (fixed observation, plain PPO); "
+                         "repeatable, and replaces the built-in ablation grid when given")
     args = ap.parse_args()
+
+    if args.model:
+        RUNS.clear()
+        paths = {}
+        for spec in args.model:
+            name, _, path = spec.partition("=")
+            RUNS[name] = dict(legacy_obs=False, masked=False)
+            paths[name] = path
+    else:
+        paths = None
 
     jobs = []
     for run in RUNS:
-        path = os.path.join(args.root, f"{run}_final.zip")
+        path = (paths[run] if paths is not None
+                else os.path.join(args.root, f"{run}_final.zip"))
         if not os.path.exists(path):
             print(f"跳过 {run}: 找不到 {path}")
             continue

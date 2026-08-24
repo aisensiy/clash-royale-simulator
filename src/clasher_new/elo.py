@@ -12,7 +12,7 @@ import itertools
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-from environment import CREnv, random_strategy
+from environment import CREnv, random_strategy, rich_obs_for
 from winrate import idle_strategy, make_rusher
 
 # Fixed reference points. The spread is a guess at the gap between doing nothing and
@@ -31,7 +31,11 @@ def load_agent(spec, masked=False):
     else:
         from stable_baselines3 import PPO as Algo
     model = Algo.load(spec, device="cpu")
-    return lambda obs: model.predict(obs, deterministic=False)[0]
+    act = lambda obs: model.predict(obs, deterministic=False)[0]
+    # Carried on the callable so the env can be built to match; scripts read only
+    # `elixir` and are happy either way.
+    act.rich_obs = rich_obs_for(model)
+    return act
 
 
 def play_match(args):
@@ -41,7 +45,9 @@ def play_match(args):
     torch.set_num_threads(1)
 
     blue = load_agent(blue_spec, masked)
-    env = CREnv(opponent_model=load_agent(red_spec, masked))
+    red = load_agent(red_spec, masked)
+    env = CREnv(opponent_model=red,
+                rich_obs=getattr(blue, "rich_obs", False) or getattr(red, "rich_obs", False))
     score = 0.0
     for i in range(games):
         # Half the games from each side, so the arena's own bias cancels instead of

@@ -10,7 +10,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 
 from card_utils import Card
-from environment import ARENA_W, CREnv, random_strategy
+from environment import ARENA_W, CREnv, random_strategy, rich_obs_for
 from winrate import idle_strategy, make_rusher
 
 SCRIPTS = {"idle": idle_strategy, "random": random_strategy, "rusher": make_rusher()}
@@ -21,7 +21,9 @@ def load_agent(spec):
         return SCRIPTS[spec]
     from stable_baselines3 import PPO
     model = PPO.load(spec, device="cpu")
-    return lambda obs: model.predict(obs, deterministic=False)[0]
+    act = lambda obs: model.predict(obs, deterministic=False)[0]
+    act.rich_obs = rich_obs_for(model)
+    return act
 
 
 def _shard(args):
@@ -30,7 +32,9 @@ def _shard(args):
     torch.set_num_threads(1)
 
     act = load_agent(model_path)
-    env = CREnv(opponent_model=load_agent(opponent_spec))
+    foe = load_agent(opponent_spec)
+    env = CREnv(opponent_model=foe,
+                rich_obs=getattr(act, "rich_obs", False) or getattr(foe, "rich_obs", False))
     columns = Counter()
     elixir_left, plays, wins, total = [], 0, 0, 0
     for i in range(games):
