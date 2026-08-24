@@ -49,10 +49,18 @@ class TileGrid:
     
     def is_walkable(self, pos: Position) -> bool:
         x, y = pos.x, pos.y
-        int_pos = (int(x), int(y))
+        # Checked before the cache is touched, and never stored. `int()` truncates toward
+        # zero, so x = -0.3 keys tile 0 and would store False there -- and collision
+        # resolution pushes units slightly out of bounds thousands of times a game. The
+        # cache is a module global, so one such query left a real tile in blue's back row
+        # permanently unwalkable for every later episode in that process. Overflow on the
+        # far side keys tile 18 or 32, which collide with nothing, so only blue lost tiles.
+        if not self.is_valid_position(pos):
+            return False
+        int_pos = (math.floor(x), math.floor(y))
         if int_pos in walkable_cache:
             return walkable_cache[int_pos]
-        if not self.is_valid_position(pos) or self.is_blocked_tile(int(pos.x), int(pos.y)):
+        if self.is_blocked_tile(int_pos[0], int_pos[1]):
             walkable_cache[int_pos] = False
         elif self.RIVER_Y1 <= pos.y <= self.RIVER_Y2:
             on_left_bridge = 2.0 <= pos.x < 5.0

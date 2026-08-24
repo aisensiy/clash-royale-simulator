@@ -180,3 +180,24 @@ def test_one_king_down_still_decides_the_game():
         b.entities[loser].hp = 0
         b.step(1 / 60)
         assert b.game_over and b.winner == expected_winner
+
+
+def test_an_out_of_bounds_query_cannot_poison_a_real_tile():
+    """`int()` truncates toward zero, so x = -0.3 keys tile 0, not tile -1.
+
+    Collision resolution pushes units slightly outside the arena thousands of times a
+    game, and the cache is a module global that outlives the battle, so one such query
+    used to leave a real tile permanently unwalkable for every later episode in the
+    process -- and only on the low-coordinate side, which is blue's.
+    """
+    import arena
+
+    grid = arena.TileGrid()
+    inside = Position(6.5, 0.5)
+    truth = grid.is_walkable(inside)
+    arena.walkable_cache.clear()
+
+    for outside in (Position(-0.3, 0.5), Position(6.5, -0.3),
+                    Position(-0.9, -0.9), Position(18.4, 32.4)):
+        assert not grid.is_walkable(outside)
+    assert grid.is_walkable(inside) == truth
