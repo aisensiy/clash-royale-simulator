@@ -3,6 +3,8 @@ import os
 import time
 
 from environment import CREnv, random_strategy, entity_names
+from selfplay import OpponentPool, PooledOpponent
+from winrate import make_rusher
 
 from gymnasium import spaces
 from sb3_contrib import MaskablePPO
@@ -88,6 +90,62 @@ class ThroughputCallback(BaseCallback):
         return True
 
 
+class SnapshotCallback(BaseCallback):
+    """Drop a copy of the current policy into the opponent pool at a fixed cadence."""
+
+    def __init__(self, pool, every, verbose=0):
+        super().__init__(verbose)
+        self.pool = pool
+        self.every = every
+        self._next = None
+
+    def _on_training_start(self):
+        # Anchor the schedule to where this run actually starts. Resuming from a 6M-step
+        # checkpoint with a counter that begins at 0 makes every threshold below 6M fire
+        # at once, filling the pool with dozens of copies of the same policy.
+        self._next = self.num_timesteps + self.every
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps >= self._next:
+            self._next += self.every
+            path = self.pool.add(self.model, self.num_timesteps)
+            if self.verbose:
+                print(f"snapshot -> {path}", flush=True)
+        return True
+
+
+class OpponentOutcomeCallback(BaseCallback):
+    """Win rate broken down by opponent type, read straight off finished episodes.
+
+    The `script:*` rows are the ones to watch. Self-play win rate sits near 50% by
+    construction whether both sides are improving or both are decaying; the scripts
+    never change, so only they can tell those two apart.
+    """
+
+    def __init__(self, window=400, verbose=0):
+        super().__init__(verbose)
+        self.window = window
+        self.history = {}
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            if "outcome" not in info:
+                continue
+            for key in (info["opponent"], info["opponent"].split(":")[0]):
+                buf = self.history.setdefault(key, [])
+                buf.append(info["outcome"])
+                if len(buf) > self.window:
+                    del buf[:-self.window]
+        return True
+
+    def _on_rollout_end(self):
+        for key, buf in self.history.items():
+            if not buf:
+                continue
+            self.logger.record(f"opponent/{key}_winrate", sum(v == 1 for v in buf) / len(buf))
+            self.logger.record(f"opponent/{key}_games", len(buf))
+
+
 class RandomEvalCallback(BaseCallback):
     """Win rate against the fixed random opponent -- the same yardstick as the old script."""
 
@@ -100,7 +158,10 @@ class RandomEvalCallback(BaseCallback):
         self.n_episodes = n_episodes
         self.use_masking = use_masking
         self.legacy_obs = legacy_obs
-        self._next = every
+        self._next = None
+
+    def _on_training_start(self):
+        self._next = self.num_timesteps + self.every
 
     def _on_step(self) -> bool:
         if self.num_timesteps < self._next:
@@ -120,12 +181,20 @@ class RandomEvalCallback(BaseCallback):
         return True
 
 
-def make_env(seed, legacy_obs):
+def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10):
     def _init():
         # Each worker simulates games in pure Python; a private BLAS thread pool per worker
-        # would oversubscribe the box without speeding anything up.
+        # would oversubscribe the box without speeding anything up. This matters twice over
+        # under self-play, where the worker also runs the opponent policy itself.
         torch.set_num_threads(1)
-        env = CREnv(opponent_model=random_strategy, legacy_obs=legacy_obs)
+        if pool_dir is None:
+            opponent = random_strategy
+        else:
+            algo = MaskablePPO if masked else PPO
+            scripts = {"random": random_strategy, "rusher": make_rusher(seed)}
+            opponent = PooledOpponent(OpponentPool(pool_dir), scripts, algo,
+                                      refresh_every=refresh_every, seed=seed)
+        env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs)
         env.reset(seed=seed)
         return env
     return _init
@@ -149,27 +218,55 @@ def main():
                         help="use MaskablePPO and forbid unaffordable or illegal actions")
     parser.add_argument("--legacy-obs", action="store_true",
                         help="ablation: reproduce the mirrored-observation bug")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="continue from an existing checkpoint instead of a fresh policy")
+    parser.add_argument("--self-play", action="store_true",
+                        help="train against a pool of past snapshots instead of a fixed script")
+    parser.add_argument("--snapshot-every", type=int, default=500_000,
+                        help="timesteps between adding the current policy to the pool")
+    parser.add_argument("--opponent-refresh", type=int, default=10,
+                        help="episodes a worker keeps one opponent before re-sampling")
     parser.add_argument("--log-dir", type=str, default="/output/cr_logs")
     args = parser.parse_args()
 
     torch.set_num_threads(args.torch_threads)
 
-    env_fns = [make_env(i, args.legacy_obs) for i in range(args.n_envs)]
+    pool_dir = os.path.join(args.log_dir, f"{args.run_name}_pool") if args.self_play else None
+    env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh)
+               for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 
     algo = MaskablePPO if args.mask else PPO
-    model = algo(
-        "MultiInputPolicy", env,
-        policy_kwargs={"features_extractor_class": CRFeatureExtractor},
-        n_steps=args.n_steps, batch_size=args.batch_size,
-        verbose=1, tensorboard_log=args.log_dir, device=args.device, seed=0,
-    )
+    if args.init_from:
+        # Self-play from a random policy throws away the run that already reached 96%
+        # against the rusher script. Load those weights and keep the same env and
+        # hyperparameters; only the opponent changes.
+        model = algo.load(args.init_from, env=env, device=args.device,
+                          n_steps=args.n_steps, batch_size=args.batch_size,
+                          tensorboard_log=args.log_dir)
+        print(f"resumed from {args.init_from}", flush=True)
+    else:
+        model = algo(
+            "MultiInputPolicy", env,
+            policy_kwargs={"features_extractor_class": CRFeatureExtractor},
+            n_steps=args.n_steps, batch_size=args.batch_size,
+            verbose=1, tensorboard_log=args.log_dir, device=args.device, seed=0,
+        )
+    model.verbose = 1
     callbacks = [
         CheckpointCallback(save_freq=max(1, 500_000 // args.n_envs),
                            save_path=args.log_dir, name_prefix=args.run_name),
         ThroughputCallback(),
-        RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs),
     ]
+    if args.self_play:
+        pool = OpponentPool(pool_dir)
+        # Seed the pool immediately: until the first snapshot lands every worker can only
+        # draw scripted opponents, which is not self-play at all.
+        pool.add(model, 0)
+        callbacks += [SnapshotCallback(pool, args.snapshot_every, verbose=1),
+                      OpponentOutcomeCallback()]
+    else:
+        callbacks.append(RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs))
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
                     tb_log_name=args.run_name, reset_num_timesteps=False)

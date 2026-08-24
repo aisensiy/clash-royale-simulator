@@ -57,7 +57,8 @@ _ALL_CELLS = np.ones((ARENA_H, ARENA_W), dtype=bool)
 
 
 class CREnv(gym.Env):
-    def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False):
+    def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
+                 realtime=True):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -74,6 +75,8 @@ class CREnv(gym.Env):
 
         self.visualize = visualize
         self.visualizer = None
+        # Watching live wants wall-clock pacing; recording a file does not.
+        self.realtime = realtime
         self._deck_0 = DECK[:]
         self._deck_1 = DECK[:]
 
@@ -85,7 +88,9 @@ class CREnv(gym.Env):
                                          player.PlayerState(1, self._deck_1[:], 5.0))
         if self.visualize:
             self.visualizer = Visualizer(self.battle)
-        # Now return initial observation
+        # Self-play opponents rotate between episodes; scripted ones have no hook.
+        if hasattr(self.opponent, "on_episode_start"):
+            self.opponent.on_episode_start()
         return self.observe(0), {}
 
     def opponent_action(self):
@@ -173,7 +178,8 @@ class CREnv(gym.Env):
                 self.battle.step(1/60)
             if self.visualizer:
                 self.visualizer.render_frame()
-                time.sleep(1/60)
+                if self.realtime:
+                    time.sleep(1/60)
         blue_hps_new = p0.king_tower_hp+p0.left_tower_hp+p0.right_tower_hp
         red_hps_new = p1.king_tower_hp+p1.left_tower_hp+p1.right_tower_hp
         blue_left_new = 3-p0.get_crown_count()
@@ -187,10 +193,18 @@ class CREnv(gym.Env):
                 reward -= 10
             # winner is None on an exact tiebreak draw: no terminal bonus either way.
 
+        info = {}
+        if self.battle.game_over:
+            # Which opponent this episode was against, so win rate can be broken down by
+            # opponent type. Against the scripts it is the only non-circular progress signal.
+            info["opponent"] = getattr(self.opponent, "label", "script:fixed")
+            info["outcome"] = (1 if self.battle.winner == 0 else
+                               -1 if self.battle.winner == 1 else 0)
+
         # Every way this game ends -- king tower down, sudden death, or the 300s rule -- is a
         # real terminal state with a decided outcome, so the value function must not bootstrap
         # past it. `truncated` stays False; it is not a time limit imposed from outside the MDP.
-        return self.observe(0), reward, self.battle.game_over, False, {}
+        return self.observe(0), reward, self.battle.game_over, False, info
 
     def observe(self, player_id_observe=0):
         """Gives an egocentric representation of the game state.
