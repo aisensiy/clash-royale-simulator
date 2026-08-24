@@ -183,8 +183,9 @@ class CREnv(gym.Env):
         if self.battle.game_over:
             if self.battle.winner == 0:
                 reward += 10
-            else:
+            elif self.battle.winner == 1:
                 reward -= 10
+            # winner is None on an exact tiebreak draw: no terminal bonus either way.
 
         # Every way this game ends -- king tower down, sudden death, or the 300s rule -- is a
         # real terminal state with a decided outcome, so the value function must not bootstrap

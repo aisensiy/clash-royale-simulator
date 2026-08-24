@@ -193,3 +193,31 @@ def test_observation_survives_units_pushed_past_the_arena_edge():
         knight.position = pos
         for pid in (0, 1):
             env.observe(pid)  # must not raise IndexError
+
+
+def test_untouched_towers_at_the_time_limit_are_a_draw():
+    """Both sides at full HP means both lowest towers fall together -- neither player wins."""
+    env = attach()
+    env.battle.time = 300.0
+    env.battle.step(1 / 60)
+    assert env.battle.game_over
+    assert env.battle.winner is None
+
+
+# Entity ids of the princess towers, from `BattleState.update_player_hp`.
+LEFT_TOWER_ENTITY = {0: 3, 1: 1}
+
+
+def test_lowest_tower_loses_the_tiebreak():
+    """The single lowest-HP tower on the board decides it, whichever side holds it.
+
+    Damage the tower entity, not `PlayerState.left_tower_hp`: every step starts with
+    `update_player_hp()`, which copies the entities back over the player fields.
+    """
+    for damaged, expected_winner in ((0, 1), (1, 0)):
+        env = attach()
+        env.battle.entities[LEFT_TOWER_ENTITY[damaged]].hp -= 100
+        env.battle.time = 300.0
+        env.battle.step(1 / 60)
+        assert env.battle.winner == expected_winner, \
+            f"player {damaged} holds the weakest tower and must lose"

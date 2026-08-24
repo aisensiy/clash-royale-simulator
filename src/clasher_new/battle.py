@@ -616,10 +616,16 @@ class BattleState:
             self.game_over = True
             min_0_hp = min(each for each in (p0h.king_tower_hp, p0h.left_tower_hp, p0h.right_tower_hp) if each > 0)
             min_1_hp = min(each for each in (p1h.king_tower_hp, p1h.left_tower_hp, p1h.right_tower_hp) if each > 0)
+            # Real-game tiebreak: every surviving tower drains at once, so whoever holds
+            # the single lowest-HP tower loses it first. Exactly equal minima means both
+            # fall together -- a draw, not a red win. That only happens when neither side
+            # ever landed a hit, which is most of early training.
             if min_0_hp > min_1_hp:
                 self.winner = 0
-            else:
+            elif min_0_hp < min_1_hp:
                 self.winner = 1
+            else:
+                self.winner = None
         for each in self.players:
             each.regenerate_elixir(dt, 2.8 if self.time < 120 else 1.4 if self.time < 240 else 2.8/3)
         self.entities = {key:value for key,value in self.entities.items() if (value.is_alive or key <= 6)}

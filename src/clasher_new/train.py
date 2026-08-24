@@ -142,8 +142,11 @@ def main():
                              "tiny batch, so a large pool here costs more than it buys")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--run-name", type=str, default="masked")
-    parser.add_argument("--no-mask", action="store_true",
-                        help="ablation: plain PPO, invalid actions left samplable")
+    # Masking is off by default: measured over 6M steps it did not beat plain PPO
+    # (92%/86% vs 92%/96% win rate against the random and rusher scripts), and a failed
+    # deploy already behaves exactly like choosing not to play a card.
+    parser.add_argument("--mask", action="store_true",
+                        help="use MaskablePPO and forbid unaffordable or illegal actions")
     parser.add_argument("--legacy-obs", action="store_true",
                         help="ablation: reproduce the mirrored-observation bug")
     parser.add_argument("--log-dir", type=str, default="/output/cr_logs")
@@ -154,7 +157,7 @@ def main():
     env_fns = [make_env(i, args.legacy_obs) for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 
-    algo = PPO if args.no_mask else MaskablePPO
+    algo = MaskablePPO if args.mask else PPO
     model = algo(
         "MultiInputPolicy", env,
         policy_kwargs={"features_extractor_class": CRFeatureExtractor},
@@ -165,7 +168,7 @@ def main():
         CheckpointCallback(save_freq=max(1, 500_000 // args.n_envs),
                            save_path=args.log_dir, name_prefix=args.run_name),
         ThroughputCallback(),
-        RandomEvalCallback(use_masking=not args.no_mask, legacy_obs=args.legacy_obs),
+        RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs),
     ]
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
