@@ -24,8 +24,7 @@ class OpponentPool:
     """
 
     def __init__(self, directory, max_snapshots=8,
-                 p_latest=0.45, p_history=0.40, p_script=0.15,
-                 script_names=("random", "rusher", "defender")):
+                 p_latest=0.45, p_history=0.40, p_script=0.15, script_names=("random", "rusher")):
         total = p_latest + p_history + p_script
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"sampling shares must sum to 1, got {total}")

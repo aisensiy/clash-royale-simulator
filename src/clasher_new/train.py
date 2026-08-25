@@ -207,7 +207,7 @@ class RandomEvalCallback(BaseCallback):
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
              record_path=None, record_every=20, rich_obs=False, dmg_scale=1.0,
-             elixir_scale=0.0):
+             elixir_scale=0.0, script_names=("random", "rusher")):
     def _init():
         # Each worker simulates games in pure Python; a private BLAS thread pool per worker
         # would oversubscribe the box without speeding anything up. This matters twice over
@@ -217,11 +217,13 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
             opponent = random_strategy
         else:
             algo = MaskablePPO if masked else PPO
-            # `anchor` is deliberately absent: it is the held-out variant, so a rating
-            # measured against it is not a rating against something drilled on.
-            scripts = {"random": random_strategy, "rusher": make_rusher(seed),
-                       "defender": make_defender(seed)}
-            opponent = PooledOpponent(OpponentPool(pool_dir), scripts, algo,
+            # `anchor` is never available here: it is the held-out variant, so that a
+            # rating measured against it is not a rating against something drilled on.
+            builders = {"random": lambda s: random_strategy, "rusher": make_rusher,
+                        "defender": make_defender}
+            scripts = {name: builders[name](seed) for name in script_names}
+            opponent = PooledOpponent(OpponentPool(pool_dir, script_names=script_names),
+                                      scripts, algo,
                                       refresh_every=refresh_every, seed=seed,
                                       masked=masked)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
@@ -273,6 +275,11 @@ def main():
     # losing nothing -- as 0.000 reward, identical to nothing having happened. This pays
     # for the change in how much elixir each side still owns, bank plus board, which is
     # where every defensive trade and every combined push shows up.
+    # The scripted defender is opt-in. Changing the opponent distribution and the
+    # reward in the same run would make neither result attributable.
+    parser.add_argument("--scripts", type=str, default="random,rusher",
+                        help="scripted opponents in the pool, comma separated; "
+                             "`defender` holds elixir and answers pushes near its tower")
     parser.add_argument("--elixir-scale", type=float, default=0.0,
                         help="weight on the elixir-differential shaping (0 = off)")
     parser.add_argument("--init-from", type=str, default=None,
@@ -296,7 +303,8 @@ def main():
     env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
                         record_path, args.record_every or 1,
                         rich_obs=args.rich_obs, dmg_scale=args.dmg_scale,
-                        elixir_scale=args.elixir_scale)
+                        elixir_scale=args.elixir_scale,
+                        script_names=tuple(args.scripts.split(",")))
                for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 
