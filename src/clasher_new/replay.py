@@ -16,27 +16,11 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 import numpy as np
 import pygame
 
-from environment import CREnv, random_strategy, rich_obs_for
-from winrate import idle_strategy, make_rusher
-
-SCRIPTS = {"random": random_strategy, "idle": idle_strategy, "rusher": make_rusher()}
+from agents import decide, load_agent
+from environment import CREnv
 CARD_SHORT = {"MiniPekka": "迷你皮卡", "Musketeer": "火枪手", "Minions": "亡灵",
               "Archer": "弓箭手", "Knight": "骑士", "Giant": "巨人",
               "Fireball": "火球", "Arrows": "箭雨"}
-
-
-def load_agent(spec, masked=False):
-    """A checkpoint path, or the name of one of the scripted opponents."""
-    if spec in SCRIPTS:
-        return SCRIPTS[spec], spec
-    if masked:
-        from sb3_contrib import MaskablePPO as Algo
-    else:
-        from stable_baselines3 import PPO as Algo
-    model = Algo.load(spec, device="cpu")
-    act = lambda obs: model.predict(obs, deterministic=False)[0]
-    act.rich_obs = rich_obs_for(model)
-    return act, os.path.basename(spec)
 
 
 def replay_recorded(args, imageio):
@@ -89,7 +73,6 @@ def main():
                     help="draw and keep one tick in N; the sim runs 60 ticks a second")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--masked", action="store_true")
     args = ap.parse_args()
 
     import imageio.v2 as imageio
@@ -99,15 +82,14 @@ def main():
     if not (args.blue and args.red):
         raise SystemExit("需要 --blue 和 --red，或者 --from-record")
 
-    blue, blue_name = load_agent(args.blue, args.masked)
-    red, red_name = load_agent(args.red, args.masked)
+    blue, red = load_agent(args.blue), load_agent(args.red)
+    blue_name, red_name = blue.name, red.name
 
     # Pin the sides so `--blue` really is the blue player in the video and the log.
     # Each side gets the observation its own checkpoint was trained on; a model handed
     # keys its network has no input layer for dies on the first prediction.
     env = CREnv(opponent_model=red, visualize=True, realtime=False, learner_player=0,
-                rich_obs=getattr(blue, "rich_obs", False),
-                opponent_rich_obs=getattr(red, "rich_obs", False))
+                rich_obs=blue.rich_obs, opponent_rich_obs=red.rich_obs)
     obs, _ = env.reset(seed=args.seed)
 
     frames, log = [], []
@@ -146,8 +128,7 @@ def main():
     step = 0
     done = False
     while not done:
-        action = blue(obs) if callable(blue) else blue
-        obs, _, done, _, _ = env.step(action)
+        obs, _, done, _, _ = env.step(decide(blue, obs, env, env.learner))
         # `deploy_card` is rebound on the battle object, which reset() replaces.
         new_crowns = (env.battle.players[1].get_crown_count(),
                       env.battle.players[0].get_crown_count())

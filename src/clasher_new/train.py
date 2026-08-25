@@ -2,9 +2,9 @@ import argparse
 import os
 import time
 
+from agents import make_rusher
 from environment import CREnv, random_strategy, entity_names
 from selfplay import OpponentPool, PooledOpponent
-from winrate import make_rusher
 
 from gymnasium import spaces
 from sb3_contrib import MaskablePPO
@@ -217,7 +217,8 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
             algo = MaskablePPO if masked else PPO
             scripts = {"random": random_strategy, "rusher": make_rusher(seed)}
             opponent = PooledOpponent(OpponentPool(pool_dir), scripts, algo,
-                                      refresh_every=refresh_every, seed=seed)
+                                      refresh_every=refresh_every, seed=seed,
+                                      masked=masked)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
                     record_path=record_path, record_every=record_every,
                     rich_obs=rich_obs, dmg_scale=dmg_scale)

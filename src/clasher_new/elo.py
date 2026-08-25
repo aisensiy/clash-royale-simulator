@@ -8,47 +8,31 @@ from drifting.
     python3 elo.py /output/sp/sp_pool --games 40 --workers 32
 """
 import argparse
-import itertools
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-from environment import CREnv, random_strategy, rich_obs_for
-from winrate import idle_strategy, make_rusher
+from agents import decide, load_agent
+from environment import CREnv
 
 # Fixed reference points. The spread is a guess at the gap between doing nothing and
 # applying constant pressure; only the differences between rated players matter, and
 # holding these still is what makes ratings comparable across training runs.
 ANCHORS = {"idle": 0.0, "random": 400.0, "rusher": 700.0}
-SCRIPTS = {"idle": idle_strategy, "random": random_strategy, "rusher": make_rusher()}
 K = 24
-
-
-def load_agent(spec, masked=False):
-    if spec in SCRIPTS:
-        return SCRIPTS[spec]
-    if masked:
-        from sb3_contrib import MaskablePPO as Algo
-    else:
-        from stable_baselines3 import PPO as Algo
-    model = Algo.load(spec, device="cpu")
-    act = lambda obs: model.predict(obs, deterministic=False)[0]
-    # Carried on the callable so the env can be built to match; scripts read only
-    # `elixir` and are happy either way.
-    act.rich_obs = rich_obs_for(model)
-    return act
 
 
 def play_match(args):
     """One pairing, `games` episodes, blue = first name. Returns points for blue."""
-    blue_spec, red_spec, games, seed, masked = args
+    blue_spec, red_spec, games, seed = args
     import torch
     torch.set_num_threads(1)
 
-    blue = load_agent(blue_spec, masked)
-    red = load_agent(red_spec, masked)
-    env = CREnv(opponent_model=red,
-                rich_obs=getattr(blue, "rich_obs", False),
-                opponent_rich_obs=getattr(red, "rich_obs", False))
+    # Whether each side is masked and which observation it wants comes out of its own
+    # checkpoint, so a masked run and an unmasked run can be rated on the same ladder.
+    blue = load_agent(blue_spec)
+    red = load_agent(red_spec)
+    env = CREnv(opponent_model=red, rich_obs=blue.rich_obs,
+                opponent_rich_obs=red.rich_obs)
     score = 0.0
     for i in range(games):
         # Half the games from each side, so the arena's own bias cancels instead of
@@ -57,7 +41,7 @@ def play_match(args):
         obs, _ = env.reset(seed=seed * 1000 + i)
         done = False
         while not done:
-            obs, _, done, _, _ = env.step(blue(obs))
+            obs, _, done, _, _ = env.step(decide(blue, obs, env, env.learner))
         winner = env.battle.winner
         score += 1.0 if winner == env.learner else 0.0 if winner is not None else 0.5
     return blue_spec, red_spec, score, games
@@ -72,7 +56,6 @@ def main():
     ap.add_argument("pool", help="directory of snapshot_*.zip")
     ap.add_argument("--games", type=int, default=40, help="episodes per ordered pairing")
     ap.add_argument("--workers", type=int, default=32)
-    ap.add_argument("--masked", action="store_true")
     args = ap.parse_args()
 
     snapshots = sorted(os.path.join(args.pool, f)
@@ -88,7 +71,7 @@ def main():
     pairings += [(a, b) for a, b in zip(snapshots, snapshots[1:])]
     pairings += [(snapshots[-1], s) for s in snapshots[:-2]]
 
-    jobs = [(b, r, args.games, i, args.masked) for i, (b, r) in enumerate(pairings)]
+    jobs = [(b, r, args.games, i) for i, (b, r) in enumerate(pairings)]
     results = []
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         for i, out in enumerate(ex.map(play_match, jobs), 1):

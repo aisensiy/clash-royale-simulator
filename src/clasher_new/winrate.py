@@ -15,37 +15,18 @@ import numpy as np
 
 from card_utils import Card
 from core import Position
+from agents import decide, idle_strategy, load_agent, make_rusher
 from environment import ARENA_H, ARENA_W, CREnv, N_SLOTS, random_strategy, rich_obs_for
 
+# Whether a checkpoint was trained with action masking is read out of the file itself;
+# only the observation layout has to be declared, because the legacy runs predate the
+# flag that records it.
 RUNS = {
-    "legacy_nomask": dict(legacy_obs=True, masked=False),
-    "legacy_mask": dict(legacy_obs=True, masked=True),
-    "fixed_nomask": dict(legacy_obs=False, masked=False),
-    "fixed_mask": dict(legacy_obs=False, masked=True),
+    "legacy_nomask": dict(legacy_obs=True),
+    "legacy_mask": dict(legacy_obs=True),
+    "fixed_nomask": dict(legacy_obs=False),
+    "fixed_mask": dict(legacy_obs=False),
 }
-
-
-def idle_strategy(observation):
-    """Never plays a card. The true floor: anything that loses to this is broken."""
-    return 0, 0, 0
-
-
-def make_rusher(seed=0):
-    """Dumps the cheapest affordable card down one lane as soon as it can afford it.
-
-    This is the 'always attacking, never defending' script the reference plan describes:
-    a low bar, but a much harder one than random because it actually applies pressure.
-    """
-    rng = random.Random(seed)
-
-    def strategy(observation):
-        elixir = float(observation['elixir'][0])
-        if elixir < 4.0:
-            return 0, 0, 0
-        slot = rng.randint(1, N_SLOTS - 1)
-        return slot, rng.randint(10, 13), rng.choice([4, 5, 12, 13])
-
-    return strategy
 
 
 OPPONENTS = {"idle": idle_strategy, "random": random_strategy, "rusher": make_rusher()}
@@ -58,28 +39,19 @@ def play(args):
     import torch
     torch.set_num_threads(1)
     cfg = RUNS[run]
-    if cfg["masked"]:
-        from sb3_contrib import MaskablePPO as Algo
-    else:
-        from stable_baselines3 import PPO as Algo
-    model = Algo.load(model_path, device="cpu")
+    agent = load_agent(model_path, deterministic=deterministic)
 
     # Sides alternate: with an arena that favours red, a blue-only measurement reads
     # several points low and is not comparable to anything measured the other way.
     env = CREnv(opponent_model=OPPONENTS[opp_name], legacy_obs=cfg["legacy_obs"],
-                rich_obs=rich_obs_for(model))
+                rich_obs=agent.rich_obs)
     wins = losses = draws = 0
     for ep in range(n_episodes):
         env.learner_player = ep % 2
         obs, _ = env.reset(seed=seed * 1000 + ep)
         done = False
         while not done:
-            if cfg["masked"]:
-                action, _ = model.predict(obs, deterministic=deterministic,
-                                          action_masks=env.action_masks())
-            else:
-                action, _ = model.predict(obs, deterministic=deterministic)
-            obs, _, done, _, _ = env.step(action)
+            obs, _, done, _, _ = env.step(decide(agent, obs, env, env.learner))
         me, foe = env.learner, 1 - env.learner
         players = env.battle.players
         # Compare crowns first so a timeout with a crown lead still counts as a win.
@@ -103,8 +75,9 @@ def main():
     ap.add_argument("--episodes", type=int, default=100)
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--model", action="append", default=[], metavar="NAME=PATH",
-                    help="evaluate an arbitrary checkpoint (fixed observation, plain PPO); "
-                         "repeatable, and replaces the built-in ablation grid when given")
+                    help="evaluate an arbitrary checkpoint (masking and observation "
+                         "layout are read from the file); repeatable, and replaces the "
+                         "built-in ablation grid when given")
     args = ap.parse_args()
 
     if args.model:
@@ -112,7 +85,7 @@ def main():
         paths = {}
         for spec in args.model:
             name, _, path = spec.partition("=")
-            RUNS[name] = dict(legacy_obs=False, masked=False)
+            RUNS[name] = dict(legacy_obs=False)
             paths[name] = path
     else:
         paths = None

@@ -176,7 +176,15 @@ class CREnv(gym.Env):
 
     def opponent_action(self):
         opponent = 1 - self.learner
-        action = self.opponent(self.observe(opponent))
+        observation = self.observe(opponent)
+        # A masked policy has to be handed the mask for the side it is actually playing.
+        # Without it, sb3-contrib samples over actions the policy never learned to score
+        # and the opponent plays close to randomly -- which under self-play means the
+        # learner spends the whole run beating up sandbags.
+        if getattr(self.opponent, "masked", False):
+            action = self.opponent(observation, self.action_masks(opponent))
+        else:
+            action = self.opponent(observation)
         self.deploy(opponent, action)
         return action
 

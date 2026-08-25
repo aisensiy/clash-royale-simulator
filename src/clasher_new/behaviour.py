@@ -9,21 +9,9 @@ import os
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 
+from agents import decide, load_agent
 from card_utils import Card
-from environment import ARENA_W, CREnv, random_strategy, rich_obs_for
-from winrate import idle_strategy, make_rusher
-
-SCRIPTS = {"idle": idle_strategy, "random": random_strategy, "rusher": make_rusher()}
-
-
-def load_agent(spec):
-    if spec in SCRIPTS:
-        return SCRIPTS[spec]
-    from stable_baselines3 import PPO
-    model = PPO.load(spec, device="cpu")
-    act = lambda obs: model.predict(obs, deterministic=False)[0]
-    act.rich_obs = rich_obs_for(model)
-    return act
+from environment import ARENA_W, CREnv
 
 
 def _shard(args):
@@ -33,9 +21,8 @@ def _shard(args):
 
     act = load_agent(model_path)
     foe = load_agent(opponent_spec)
-    env = CREnv(opponent_model=foe,
-                rich_obs=getattr(act, "rich_obs", False),
-                opponent_rich_obs=getattr(foe, "rich_obs", False))
+    env = CREnv(opponent_model=foe, rich_obs=act.rich_obs,
+                opponent_rich_obs=foe.rich_obs)
     columns = Counter()
     elixir_left, plays, wins, total = [], 0, 0, 0
     for i in range(games):
@@ -43,7 +30,7 @@ def _shard(args):
         obs, _ = env.reset(seed=seed * 1000 + i)
         done = False
         while not done:
-            action = act(obs)
+            action = decide(act, obs, env, env.learner)
             slot, y, x = int(action[0]), int(action[1]), int(action[2])
             if slot != 0:
                 card = env.battle.players[env.learner].cycle[slot - 1]

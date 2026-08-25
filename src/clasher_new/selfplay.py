@@ -111,10 +111,12 @@ class PooledOpponent:
     worker instead of the whole pool per worker.
     """
 
-    def __init__(self, pool, scripts, algo, refresh_every=10, seed=0, device="cpu"):
+    def __init__(self, pool, scripts, algo, refresh_every=10, seed=0, device="cpu",
+                 masked=False):
         self.pool = pool
         self.scripts = scripts          # name -> callable(observation) -> action
         self.algo = algo                # PPO or MaskablePPO
+        self._masked = masked
         self.refresh_every = refresh_every
         self.device = device
         self.rng = random.Random(seed)
@@ -124,6 +126,17 @@ class PooledOpponent:
         self._policy_path = None
         self._script = None
         self._resample()
+
+    @property
+    def masked(self):
+        """Whether the environment should hand this opponent an action mask.
+
+        A MaskablePPO policy scores invalid actions with weights that were never
+        trained, so sampling it without a mask produces near-noise -- under self-play
+        that turns the whole opponent pool into sandbags. Scripts want no mask even in a
+        masked run, so this follows whichever opponent is currently loaded.
+        """
+        return self._masked and self._script is None
 
     def on_episode_start(self):
         self._episodes += 1
@@ -141,8 +154,12 @@ class PooledOpponent:
             self._policy = self.algo.load(target, device=self.device)
             self._policy_path = target
 
-    def __call__(self, observation):
+    def __call__(self, observation, action_masks=None):
         if self._script is not None:
             return self._script(observation)
-        action, _ = self._policy.predict(observation, deterministic=False)
+        if self._masked:
+            action, _ = self._policy.predict(observation, deterministic=False,
+                                             action_masks=action_masks)
+        else:
+            action, _ = self._policy.predict(observation, deterministic=False)
         return action
