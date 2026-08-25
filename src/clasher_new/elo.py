@@ -56,20 +56,24 @@ def main():
     ap.add_argument("pool", help="directory of snapshot_*.zip")
     ap.add_argument("--games", type=int, default=40, help="episodes per ordered pairing")
     ap.add_argument("--workers", type=int, default=32)
+    ap.add_argument("--extra", action="append", default=[], metavar="SCRIPT",
+                    help="rate a named script alongside the snapshots; unlike the "
+                         "anchors its rating is solved for rather than pinned")
     args = ap.parse_args()
 
     snapshots = sorted(os.path.join(args.pool, f)
                        for f in os.listdir(args.pool) if f.endswith(".zip"))
     if not snapshots:
         raise SystemExit(f"no snapshots in {args.pool}")
-    players = list(ANCHORS) + snapshots
+    players = list(ANCHORS) + args.extra + snapshots
 
     # Every snapshot plays every anchor and its neighbours. A full round robin over a
     # large pool costs more than it tells us -- what matters is each snapshot's position
     # against the fixed anchors and against the versions either side of it.
-    pairings = [(s, a) for s in snapshots for a in ANCHORS]
-    pairings += [(a, b) for a, b in zip(snapshots, snapshots[1:])]
-    pairings += [(snapshots[-1], s) for s in snapshots[:-2]]
+    rated = args.extra + snapshots
+    pairings = [(s, a) for s in rated for a in ANCHORS]
+    pairings += [(a, b) for a, b in zip(rated, rated[1:])]
+    pairings += [(rated[-1], s) for s in rated[:-2]]
 
     jobs = [(b, r, args.games, i) for i, (b, r) in enumerate(pairings)]
     results = []

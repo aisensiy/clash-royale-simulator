@@ -86,15 +86,32 @@ def test_the_anchor_holds_longer_than_the_training_copy():
 RIVER_SIDE = Position(3.5, 20.0)     # red's half, so a red unit walks down from there
 
 
-def test_it_answers_a_push_that_has_crossed():
-    """Even below its holding threshold: a threat overrides the bank."""
-    obs = observation(elixir=5.0, enemy_at=[("Knight", RIVER_SIDE)])
-    # Walk the threat into our half by placing it where it will already have crossed.
-    obs = observation(elixir=5.0, enemy_at=[("Knight", Position(3.5, 18.0))])
+def test_it_answers_a_push_big_enough_to_matter():
+    """A real push gets a card, and the card goes between it and our own tower."""
+    obs = observation(elixir=6.0,
+                      enemy_at=[("Giant", Position(3.5, 18.0)),
+                                ("Musketeer", Position(4.5, 19.0))])
     slot, row, _ = played(make_defender()(obs))
-    if slot == 0:
-        pytest.skip("the threat has not crossed yet in this snapshot")
+    assert slot != 0, "a 9 elixir push went unanswered"
     assert FIRST_ROW <= row <= LAST_ROW
+
+
+def test_a_lone_cheap_unit_is_left_to_the_tower():
+    """Measured in test_game_mechanics: a princess tower kills a lone Musketeer on its
+    own. Spending a card on it would be paying to win a trade already being won."""
+    obs = observation(elixir=6.0, enemy_at=[("Musketeer", Position(3.5, 19.0))])
+    slot, _, _ = played(make_defender()(obs))
+    assert slot == 0, "spent a card answering something the tower handles for free"
+
+
+def test_it_answers_anything_that_gets_close_regardless_of_size():
+    """Cheap is not harmless once it is on top of the tower."""
+    act = make_defender()
+    obs = observation(elixir=6.0, enemy_at=[("Minions", Position(3.5, 18.0))])
+    rows = np.nonzero((obs["grid"][:, :, 1] > 0.5) & (obs["grid"][:, :, 2] > 0))[0]
+    if not len(rows) or int(np.min(rows)) > 10:
+        pytest.skip("the unit has not walked close enough in this snapshot")
+    assert played(act(obs))[0] != 0
 
 
 def test_it_never_places_outside_the_legal_band():

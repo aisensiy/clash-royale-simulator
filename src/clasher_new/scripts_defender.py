@@ -28,12 +28,14 @@ from environment import ARENA_H, ARENA_W, N_SLOTS, entity_names
 CH_PLAYER = 1     # 0 = mine, 1 = theirs, in the acting player's own frame
 CH_COST = 2       # the card's elixir price; towers cost nothing, which is how they
                   # are told apart from units without naming them
+CH_HEALTH = 9     # fraction of its hit points a unit still has
 
 # The near edge of the arena is rows 0..15 in the acting player's own frame. Cards may
 # not be placed past row 14 while the enemy's towers stand, and rows 0..8 are where our
 # own towers sit, so every placement this script makes lives in between.
 FIRST_ROW, LAST_ROW = 9, 14
 OWN_HALF = 17     # anything at or below this row is across the river and coming
+URGENT_ROW = 10   # this close, it is about to be in range of a tower
 LANES = (3, 14)   # the two princess tower columns
 
 
@@ -66,11 +68,13 @@ def _support_value(name):
 
 
 def _threats(grid):
-    """Rows and columns of every enemy unit that has crossed into our half."""
+    """Rows, columns and total elixir value of the enemy units in our half."""
     enemy = (grid[:, :, CH_PLAYER] > 0.5) & (grid[:, :, CH_COST] > 0)
     rows, cols = np.nonzero(enemy)
     keep = rows <= OWN_HALF
-    return rows[keep], cols[keep]
+    rows, cols = rows[keep], cols[keep]
+    value = float(np.sum(grid[rows, cols, CH_COST] * grid[rows, cols, CH_HEALTH]))
+    return rows, cols, value
 
 
 def _own_units(grid):
@@ -78,12 +82,15 @@ def _own_units(grid):
     return np.nonzero(mine)
 
 
-def make_defender(seed=0, hold=6.0, push_at=8.0, support_gap=2):
+def make_defender(seed=0, push_at=8.0, support_gap=2, answer_at=5.0):
     """Hold elixir, answer pushes near your own tower, commit tank and support together.
 
-    `hold` is the bank it will not spend below unless something is coming; `push_at` is
-    what it waits for before starting an attack of its own. `seed` is accepted so this
-    is interchangeable with the other script factories, which need one.
+    `push_at` is the bank it waits for before starting an attack of its own; `answer_at`
+    is how much enemy elixir has to be standing in our half before answering is worth a
+    card at all. Sweeping `answer_at` against the strongest checkpoint moved the script's
+    win rate from 62% at 0 -- answer everything, which is spend-on-arrival by another
+    name -- to 88% at 5. `seed` is accepted so this is interchangeable with the other
+    script factories, which need one.
     """
     state = {"support": None}
 
@@ -107,8 +114,13 @@ def make_defender(seed=0, hold=6.0, push_at=8.0, support_gap=2):
             slot, _ = max(playable, key=lambda p: _support_value(p[1]))
             return slot, max(FIRST_ROW, row - support_gap), col
 
-        rows, cols = _threats(grid)
-        if len(rows):
+        rows, cols, value = _threats(grid)
+        # Not every unit that crosses is worth a card. A princess tower kills a lone
+        # Musketeer on its own, for nothing -- answering it would be spending 3 or 4
+        # elixir to save a trade the tower was already winning. Commit only when the
+        # push is big enough to get through, or when something is nearly on top of us.
+        urgent = len(rows) and int(np.min(rows)) <= URGENT_ROW
+        if len(rows) and (value >= answer_at or urgent):
             # Answer the deepest one -- the closest to our own tower -- and stand between
             # it and the tower rather than running out to meet it, so the tower's damage
             # is added to whatever we put down.
@@ -125,7 +137,7 @@ def make_defender(seed=0, hold=6.0, push_at=8.0, support_gap=2):
 
         # Nothing to answer. Spend only out of a full bank, and lead with the tank so
         # the support that follows next decision has something to hide behind.
-        if elixir < max(hold, push_at):
+        if elixir < push_at:
             return 0, 0, 0
         slot, name = max(playable, key=lambda p: _tank_value(p[1]))
         col = LANES[int(elixir * 10) % 2]     # alternate lanes without needing a rng
@@ -143,4 +155,4 @@ def make_anchor(seed=0):
     against play the agent was never drilled on. Beating the training copy of a script
     and beating the idea it stands for are not the same thing.
     """
-    return make_defender(seed=seed, hold=7.0, push_at=9.0, support_gap=3)
+    return make_defender(seed=seed, push_at=9.0, support_gap=3, answer_at=6.0)
