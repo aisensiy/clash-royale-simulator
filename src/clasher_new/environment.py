@@ -28,6 +28,18 @@ N_SLOTS = 5  # slot 0 is "do nothing", slots 1..4 are the four cards in hand
 N_CONTEXT = 8  # see CREnv.observe: the scalars a human reads off the screen
 KING_TOWER_HP = 4824
 
+# What one unit of each card is worth, in elixir. A card that summons several bodies
+# splits its cost between them, or a Minions deploy would read as 9 elixir of value for
+# a 3 elixir card.
+UNIT_VALUE = {name: Card(name).elixir / Card(name).spawn_number
+              for name in DECK if Card(name).type != 'spell'}
+
+# How much of a unit's price is only collected by finishing it off. Chip damage is worth
+# real but limited credit: a Giant on one hit point still deals full damage, so paying
+# out its whole value for damage alone would reward harassing a push instead of killing
+# it. At 0.5 a kill is always worth more than every point of chip damage before it.
+KILL_SHARE = 0.5
+
 
 def _base_troop_legality():
     """Cells where a troop may be deployed by player 0, ignoring buildings and tower state.
@@ -64,7 +76,8 @@ class CREnv(gym.Env):
     def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
                  realtime=True, learner_player=None,
                  record_path=None, record_every=20,
-                 rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0):
+                 rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0,
+                 elixir_scale=0.0):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -87,6 +100,7 @@ class CREnv(gym.Env):
         # full game (~10.9) rivals the terminal win bonus (10), which pays for constant
         # output regardless of whether the trade was good.
         self.dmg_scale = dmg_scale
+        self.elixir_scale = elixir_scale
         spaces = {
             "grid": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(ARENA_H, ARENA_W, 15), dtype=np.float32),
             "hand": gym.spaces.Box(low=0, high=len(entity_names) - 1, shape=(5,), dtype=np.int32),
@@ -230,6 +244,35 @@ class CREnv(gym.Env):
 
         return np.concatenate([slot_mask, legal.any(axis=1), legal.any(axis=0)])
 
+    def _army_value(self, player_id):
+        """The elixir standing on the board for one side, discounted by damage taken.
+
+        A unit at full health is worth exactly what it cost -- which is what keeps
+        playing a card worth nothing by itself -- and it keeps `KILL_SHARE` of that price
+        until the moment it dies. Towers are not included: they were never bought, and
+        `UNIT_VALUE` has no entry for them.
+        """
+        total = 0.0
+        for entity in self.battle.entities.values():
+            if entity.player != player_id or not entity.is_alive:
+                continue
+            value = UNIT_VALUE.get(entity.name)
+            if value is None or not isinstance(entity, battle.Troop):
+                continue
+            health = max(0.0, entity.hp) / entity.data.hp
+            total += value * (KILL_SHARE + (1.0 - KILL_SHARE) * health)
+        return total
+
+    def _elixir_edge(self):
+        """How far ahead the learner is, counting the bank and the board together.
+
+        Playing a card moves elixir from one to the other and leaves this unchanged, so
+        the shaping cannot be farmed by dumping cards; only trades move it.
+        """
+        me, foe = self.learner, 1 - self.learner
+        return ((self.battle.players[me].elixir + self._army_value(me))
+                - (self.battle.players[foe].elixir + self._army_value(foe)))
+
     def note_external_play(self, player_id, card_name):
         """Record a play that did not go through `deploy`.
 
@@ -333,6 +376,7 @@ class CREnv(gym.Env):
         foe_hps_old = foe.king_tower_hp+foe.left_tower_hp+foe.right_tower_hp
         my_left = 3-me.get_crown_count()
         foe_left = 3-foe.get_crown_count()
+        edge_old = self._elixir_edge() if self.elixir_scale else 0.0
 
         self.deploy(self.learner, action)
         opponent_action = self.opponent_action()
@@ -357,6 +401,17 @@ class CREnv(gym.Env):
         reward = (5*(foe_left-foe_left_new) - 5*(my_left-my_left_new)
                   + self.dmg_scale*(0.001*(foe_hps_old-foe_hps_new)
                                     - 0.0012*(my_hps_old-my_hps_new)))
+        if self.elixir_scale and not self.battle.game_over:
+            # A potential over the elixir each side still owns: what is in the bank plus
+            # what is standing on the board. Rewarding the change in it makes an elixir
+            # trade visible the moment it happens -- killing a 5 elixir push with a 3
+            # elixir answer is +2 -- where tower HP alone reports a perfect defence as
+            # nothing having happened at all.
+            #
+            # Skipped on the terminal step: the winner's towers falling clears the board,
+            # and a potential that jumps to zero would pay out a spurious lump sum that
+            # has nothing to do with the trade.
+            reward += self.elixir_scale * (self._elixir_edge() - edge_old)
         if self.battle.game_over:
             if self.battle.winner == self.learner:
                 reward += 10

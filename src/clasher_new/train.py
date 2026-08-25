@@ -205,7 +205,8 @@ class RandomEvalCallback(BaseCallback):
 
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
-             record_path=None, record_every=20, rich_obs=False, dmg_scale=1.0):
+             record_path=None, record_every=20, rich_obs=False, dmg_scale=1.0,
+             elixir_scale=0.0):
     def _init():
         # Each worker simulates games in pure Python; a private BLAS thread pool per worker
         # would oversubscribe the box without speeding anything up. This matters twice over
@@ -221,7 +222,8 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
                                       masked=masked)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
                     record_path=record_path, record_every=record_every,
-                    rich_obs=rich_obs, dmg_scale=dmg_scale)
+                    rich_obs=rich_obs, dmg_scale=dmg_scale,
+                    elixir_scale=elixir_scale)
         env.reset(seed=seed)
         return env
     return _init
@@ -263,6 +265,12 @@ def main():
     # the shaping keeps its role as a dense learning signal without outweighing the result.
     parser.add_argument("--dmg-scale", type=float, default=0.25,
                         help="multiplier on both tower-damage shaping terms (1.0 = legacy)")
+    # Tower HP alone reports a perfect defence -- killing a 9 elixir push with 6 and
+    # losing nothing -- as 0.000 reward, identical to nothing having happened. This pays
+    # for the change in how much elixir each side still owns, bank plus board, which is
+    # where every defensive trade and every combined push shows up.
+    parser.add_argument("--elixir-scale", type=float, default=0.0,
+                        help="weight on the elixir-differential shaping (0 = off)")
     parser.add_argument("--init-from", type=str, default=None,
                         help="continue from an existing checkpoint instead of a fresh policy")
     parser.add_argument("--self-play", action="store_true",
@@ -283,7 +291,8 @@ def main():
                    if args.record_every else None)
     env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
                         record_path, args.record_every or 1,
-                        rich_obs=args.rich_obs, dmg_scale=args.dmg_scale)
+                        rich_obs=args.rich_obs, dmg_scale=args.dmg_scale,
+                        elixir_scale=args.elixir_scale)
                for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 

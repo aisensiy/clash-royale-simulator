@@ -22,8 +22,27 @@ from agents import decide, load_agent, make_rusher
 from card_utils import Card
 from environment import CREnv
 
-# Elixir generated over a full 300s game at the three regeneration tiers.
-ELIXIR_PER_GAME = 193
+STARTING_ELIXIR = 5.0
+
+# Seconds per elixir, by the tier boundaries in `BattleState.step`.
+TIERS = ((120.0, 2.8), (240.0, 1.4), (float("inf"), 2.8 / 3))
+
+
+def elixir_generated(duration):
+    """How much elixir a player earns in a game of `duration` seconds.
+
+    Comparing what was spent against a full 300s game's worth is what made the earlier
+    read of these numbers wrong: the agents end their games around 160s, so a
+    300s budget makes a player who spends everything look like a hoarder.
+    """
+    total, start = 0.0, 0.0
+    for end, seconds_each in TIERS:
+        total += max(0.0, min(duration, end) - start) / seconds_each
+        start = end
+        if duration <= end:
+            break
+    return total
+
 
 BUCKETS = ("chose to wait", "cannot afford", "tried to place", "placed", "illegal cell")
 
@@ -35,7 +54,7 @@ def shard(args):
 
     agent = load_agent(path)
     env = CREnv(opponent_model=make_rusher(seed), rich_obs=agent.rich_obs)
-    elixir, tally, spent, played = [], Counter(), 0.0, 0
+    elixir, tally, spent, played, seconds = [], Counter(), 0.0, 0, 0.0
     for i in range(games):
         env.learner_player = i % 2
         obs, _ = env.reset(seed=seed * 1000 + i)
@@ -60,7 +79,8 @@ def shard(args):
             elif affordable:
                 tally["illegal cell"] += 1
         played += 1
-    return elixir, tally, spent, played
+        seconds += env.battle.time
+    return elixir, tally, spent, played, seconds
 
 
 def main():
@@ -81,6 +101,8 @@ def main():
             tally.update(r[1])
         spent = sum(r[2] for r in out)
         games = sum(r[3] for r in out)
+        seconds = sum(r[4] for r in out)
+        earned = elixir_generated(seconds / games) + STARTING_ELIXIR
 
         print(f"\n{os.path.basename(path)}  ({games} 局, {len(elixir)} 个决策点)")
         print(f"  圣水均值 {elixir.mean():.2f}   中位数 {np.median(elixir):.2f}")
@@ -92,7 +114,8 @@ def main():
         total = tally["chose to wait"] + tally["cannot afford"] + tally["tried to place"]
         for key in BUCKETS:
             print(f"  {key:<16} {tally[key]:>7}  ({100 * tally[key] / total:.1f}% of decisions)")
-        print(f"  实际花掉的圣水 {spent / games:.0f}/局（一局总产出约 {ELIXIR_PER_GAME}）")
+        print(f"  一局平均 {seconds / games:.0f} 秒，这么长的一局能挣到 {earned:.0f} 圣水")
+        print(f"  实际花掉 {spent / games:.0f}/局 —— 挣到的 {100 * spent / games / earned:.0f}%")
 
 
 if __name__ == "__main__":
