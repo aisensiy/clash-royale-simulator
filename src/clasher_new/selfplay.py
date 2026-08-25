@@ -24,7 +24,8 @@ class OpponentPool:
     """
 
     def __init__(self, directory, max_snapshots=8,
-                 p_latest=0.45, p_history=0.40, p_script=0.15, script_names=("random", "rusher")):
+                 p_latest=0.45, p_history=0.40, p_script=0.15,
+                 script_names=("random", "rusher", "defender")):
         total = p_latest + p_history + p_script
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"sampling shares must sum to 1, got {total}")
@@ -139,6 +140,10 @@ class PooledOpponent:
         return self._masked and self._script is None
 
     def on_episode_start(self):
+        # Scripts may carry state between decisions; forward the hook so a half-finished
+        # push does not leak into the next game.
+        if self._script is not None and hasattr(self._script, "on_episode_start"):
+            self._script.on_episode_start()
         self._episodes += 1
         if self._episodes % self.refresh_every == 0:
             self._resample()

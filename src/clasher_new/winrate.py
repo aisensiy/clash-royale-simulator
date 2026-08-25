@@ -15,7 +15,7 @@ import numpy as np
 
 from card_utils import Card
 from core import Position
-from agents import decide, idle_strategy, load_agent, make_rusher
+from agents import SCRIPTS, decide, load_agent
 from environment import ARENA_H, ARENA_W, CREnv, N_SLOTS, random_strategy, rich_obs_for
 
 # Whether a checkpoint was trained with action masking is read out of the file itself;
@@ -29,7 +29,9 @@ RUNS = {
 }
 
 
-OPPONENTS = {"idle": idle_strategy, "random": random_strategy, "rusher": make_rusher()}
+# `anchor` is the held-out scripted defender: it never appears in the opponent pool, so
+# a win rate against it is a win rate against play the agent was not drilled on.
+OPPONENT_NAMES = ("idle", "random", "rusher", "anchor")
 
 
 def play(args):
@@ -43,7 +45,8 @@ def play(args):
 
     # Sides alternate: with an arena that favours red, a blue-only measurement reads
     # several points low and is not comparable to anything measured the other way.
-    env = CREnv(opponent_model=OPPONENTS[opp_name], legacy_obs=cfg["legacy_obs"],
+    # A fresh instance per worker: the defender scripts keep state between decisions.
+    env = CREnv(opponent_model=SCRIPTS[opp_name](seed), legacy_obs=cfg["legacy_obs"],
                 rich_obs=agent.rich_obs)
     wins = losses = draws = 0
     for ep in range(n_episodes):
@@ -97,7 +100,7 @@ def main():
         if not os.path.exists(path):
             print(f"跳过 {run}: 找不到 {path}")
             continue
-        for opp in OPPONENTS:
+        for opp in OPPONENT_NAMES:
             for det in (True, False):
                 per = max(1, args.episodes // 4)
                 for shard in range(4):
@@ -116,10 +119,10 @@ def main():
 
     for det in (False, True):
         print(f"\n{'=== 采样策略（训练时的行为）' if not det else '=== 确定性策略（每步取最优）'} ===")
-        print(f"{'配置':<16}" + "".join(f"{o:>22}" for o in OPPONENTS))
+        print(f"{'配置':<16}" + "".join(f"{o:>22}" for o in OPPONENT_NAMES))
         for run in RUNS:
             row = f"{run:<16}"
-            for opp in OPPONENTS:
+            for opp in OPPONENT_NAMES:
                 if (run, opp, det) not in tally:
                     row += f"{'-':>22}"
                     continue

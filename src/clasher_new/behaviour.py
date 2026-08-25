@@ -9,7 +9,7 @@ import os
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 
-from agents import decide, load_agent
+from agents import SCRIPTS, decide, load_agent
 from card_utils import Card
 from environment import ARENA_W, CREnv
 

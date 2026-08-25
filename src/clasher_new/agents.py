@@ -17,6 +17,7 @@ import random
 import zipfile
 
 from environment import N_SLOTS, random_strategy, rich_obs_for
+from scripts_defender import make_anchor, make_defender
 
 
 def idle_strategy(observation):
@@ -42,7 +43,16 @@ def make_rusher(seed=0):
     return strategy
 
 
-SCRIPTS = {"idle": idle_strategy, "random": random_strategy, "rusher": make_rusher()}
+# Factories, not instances. `make_defender` keeps state between decisions, and elo.py
+# loads both sides of a match by name -- handing the same object to blue and red would
+# have them share it.
+SCRIPTS = {
+    "idle": lambda seed=0: idle_strategy,
+    "random": lambda seed=0: random_strategy,
+    "rusher": make_rusher,
+    "defender": make_defender,
+    "anchor": make_anchor,
+}
 
 
 def is_masked_checkpoint(path):
@@ -61,11 +71,15 @@ def is_masked_checkpoint(path):
 def load_agent(spec, deterministic=False):
     """A scripted opponent by name, or a checkpoint by path."""
     if spec in SCRIPTS:
-        act = SCRIPTS[spec]
+        act = SCRIPTS[spec]()
         wrapped = lambda obs, masks=None: act(obs)
         wrapped.rich_obs = False
         wrapped.masked = False
         wrapped.name = spec
+        # A stateful script has to be told when a new game starts, or it carries the last
+        # one's half-finished push into the next.
+        if hasattr(act, "on_episode_start"):
+            wrapped.on_episode_start = act.on_episode_start
         return wrapped
 
     masked = is_masked_checkpoint(spec)

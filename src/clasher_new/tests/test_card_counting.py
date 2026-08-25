@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from environment import ARENA_H, ARENA_W, CREnv, DECK, N_CONTEXT, random_strategy
-from winrate import make_rusher
+from agents import make_rusher
 
 
 def rich_env(**kwargs):

@@ -3,6 +3,7 @@ import os
 import time
 
 from agents import make_rusher
+from scripts_defender import make_defender
 from environment import CREnv, random_strategy, entity_names
 from selfplay import OpponentPool, PooledOpponent
 
@@ -216,7 +217,10 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
             opponent = random_strategy
         else:
             algo = MaskablePPO if masked else PPO
-            scripts = {"random": random_strategy, "rusher": make_rusher(seed)}
+            # `anchor` is deliberately absent: it is the held-out variant, so a rating
+            # measured against it is not a rating against something drilled on.
+            scripts = {"random": random_strategy, "rusher": make_rusher(seed),
+                       "defender": make_defender(seed)}
             opponent = PooledOpponent(OpponentPool(pool_dir), scripts, algo,
                                       refresh_every=refresh_every, seed=seed,
                                       masked=masked)
