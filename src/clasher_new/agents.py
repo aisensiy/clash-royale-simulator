@@ -18,6 +18,7 @@ import zipfile
 
 from environment import N_SLOTS, random_strategy, rich_obs_for
 from scripts_defender import make_anchor, make_defender
+from scripts_counter import make_counter
 from scripts_sniper import make_sniper
 
 
@@ -53,9 +54,11 @@ SCRIPTS = {
     "rusher": make_rusher,
     "defender": make_defender,
     "anchor": make_anchor,
-    # Held out of training on purpose -- see scripts_sniper.py. Do not add it to the
-    # builders in train.py.
     "sniper": make_sniper,
+    # The held-out ruler -- see scripts_counter.py. Do not add it to the builders in
+    # train.py; `sniper` was held out until it was promoted to a training opponent, and
+    # this is what replaced it.
+    "counter": make_counter,
 }
 
 

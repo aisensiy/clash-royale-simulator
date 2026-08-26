@@ -24,7 +24,8 @@ class OpponentPool:
     """
 
     def __init__(self, directory, max_snapshots=8,
-                 p_latest=0.45, p_history=0.40, p_script=0.15, script_names=("random", "rusher")):
+                 p_latest=0.45, p_history=0.40, p_script=0.15, script_names=("random", "rusher"),
+                 script_weights=None):
         total = p_latest + p_history + p_script
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"sampling shares must sum to 1, got {total}")
@@ -36,6 +37,13 @@ class OpponentPool:
         self.p_history = p_history
         self.p_script = p_script
         self.script_names = tuple(script_names)
+        # The scripts are not equally worth playing. `rusher` and `random` are there as a
+        # fixed yardstick and lose to everything; a script that actually beats the agent
+        # is the one worth most of the training share. Uniform unless told otherwise.
+        self.script_weights = ([1.0] * len(self.script_names) if script_weights is None
+                               else [float(w) for w in script_weights])
+        if len(self.script_weights) != len(self.script_names):
+            raise ValueError("one weight per script, or none at all")
 
     # ---------------------------------------------------------------- snapshots
 
@@ -98,7 +106,7 @@ class OpponentPool:
         return HISTORY, "history", rng.choice(paths[:-1])
 
     def _pick_script(self, rng):
-        self._last_script = rng.choice(self.script_names)
+        self._last_script = rng.choices(self.script_names, weights=self.script_weights)[0]
         return self._last_script
 
 

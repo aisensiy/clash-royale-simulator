@@ -153,11 +153,13 @@ def test_it_disagrees_with_the_defender_on_the_same_board():
     assert played(make_sniper()(obs)) != played(make_defender()(obs))
 
 
-def test_it_is_not_in_the_training_pool():
-    """A ruler stops being a ruler the moment something trains against it."""
+def test_it_is_available_as_a_training_opponent():
+    """It started out held out of training, and stopped being a ruler the moment it was
+    promoted: it beats every checkpoint measured, which makes it worth far more as a
+    teacher than as a yardstick. `scripts_counter` took over as the held-out one."""
     import train
     source = open(train.__file__).read()
-    assert "sniper" not in source, "sniper reached train.py; the held-out rating is gone"
+    assert '"sniper": make_sniper' in source
 
 
 # --------------------------------------------------------------------- plumbing

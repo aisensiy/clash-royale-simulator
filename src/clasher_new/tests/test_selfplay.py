@@ -105,3 +105,25 @@ def test_snapshot_schedule_anchors_to_where_the_run_starts(tmp_path):
     cb.num_timesteps = 6_100_000
     cb._on_step()
     assert len(pool.snapshot_paths()) == 1
+
+
+def test_scripts_can_be_weighted(tmp_path):
+    """A script that beats the agent is worth more training time than one that loses to
+    everything, and the pool has to be able to say so."""
+    pool = make_pool(tmp_path, n_snapshots=0,
+                     script_names=("random", "sniper"), script_weights=(1, 9))
+    rng = random.Random(0)
+    drawn = Counter(pool.sample(rng)[2] for _ in range(2000))
+    assert 0.8 < drawn["sniper"] / 2000 < 0.98, drawn
+
+
+def test_a_weight_per_script_or_none_at_all(tmp_path):
+    with pytest.raises(ValueError):
+        OpponentPool(str(tmp_path), script_names=("random", "rusher"), script_weights=(1,))
+
+
+def test_unweighted_scripts_stay_uniform(tmp_path):
+    pool = make_pool(tmp_path, script_names=("random", "rusher"))
+    rng = random.Random(1)          # one stream: a fresh Random(1) per draw is a constant
+    drawn = Counter(pool.sample(rng)[2] for _ in range(2000))
+    assert 0.45 < drawn["random"] / 2000 < 0.55, drawn

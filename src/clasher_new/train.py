@@ -4,6 +4,7 @@ import time
 
 from agents import make_rusher
 from scripts_defender import make_defender
+from scripts_sniper import make_sniper
 from environment import CREnv, random_strategy, entity_names
 from selfplay import OpponentPool, PooledOpponent
 
@@ -207,7 +208,8 @@ class RandomEvalCallback(BaseCallback):
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
              record_path=None, record_every=20, rich_obs=False, dmg_scale=1.0,
-             elixir_scale=0.0, script_names=("random", "rusher")):
+             elixir_scale=0.0, script_names=("random", "rusher"), script_weights=None,
+             script_share=0.15):
     def _init():
         # Each worker simulates games in pure Python; a private BLAS thread pool per worker
         # would oversubscribe the box without speeding anything up. This matters twice over
@@ -217,13 +219,20 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
             opponent = random_strategy
         else:
             algo = MaskablePPO if masked else PPO
-            # `anchor` is never available here: it is the held-out variant, so that a
-            # rating measured against it is not a rating against something drilled on.
+            # `anchor` and `counter` are never available here. `anchor` is the defender's
+            # held-out twin, and `counter` is the ruler: rating against something that was
+            # in the pool measures drill, not strength.
             builders = {"random": lambda s: random_strategy, "rusher": make_rusher,
-                        "defender": make_defender}
+                        "defender": make_defender, "sniper": make_sniper}
             scripts = {name: builders[name](seed) for name in script_names}
-            opponent = PooledOpponent(OpponentPool(pool_dir, script_names=script_names),
-                                      scripts, algo,
+            # The snapshot share gives way to the scripts, not the latest-vs-history split:
+            # sampling the newest snapshot less often is what makes self-play chase itself.
+            history = max(0.0, 1.0 - script_share - 0.45)
+            pool = OpponentPool(pool_dir, script_names=script_names,
+                                script_weights=script_weights,
+                                p_latest=1.0 - script_share - history,
+                                p_history=history, p_script=script_share)
+            opponent = PooledOpponent(pool, scripts, algo,
                                       refresh_every=refresh_every, seed=seed,
                                       masked=masked)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
@@ -278,8 +287,14 @@ def main():
     # The scripted defender is opt-in. Changing the opponent distribution and the
     # reward in the same run would make neither result attributable.
     parser.add_argument("--scripts", type=str, default="random,rusher",
-                        help="scripted opponents in the pool, comma separated; "
-                             "`defender` holds elixir and answers pushes near its tower")
+                        help="scripted opponents in the pool, comma separated, each "
+                             "optionally weighted as name:weight -- `defender` holds elixir "
+                             "and answers pushes near its tower, `sniper` answers every "
+                             "crossing with the cheapest body in range of its own tower and "
+                             "beats every checkpoint measured so far")
+    parser.add_argument("--script-share", type=float, default=0.15,
+                        help="fraction of episodes played against a script rather than a "
+                             "snapshot; the rest of the pool loses the difference")
     parser.add_argument("--elixir-scale", type=float, default=0.0,
                         help="weight on the elixir-differential shaping (0 = off)")
     parser.add_argument("--init-from", type=str, default=None,
@@ -297,6 +312,11 @@ def main():
 
     torch.set_num_threads(args.torch_threads)
 
+    # "random,rusher" and "sniper:4,rusher:1" are both accepted; an unweighted name is 1.
+    parsed = [part.split(":") for part in args.scripts.split(",") if part]
+    script_names = tuple(p[0] for p in parsed)
+    script_weights = [float(p[1]) if len(p) > 1 else 1.0 for p in parsed]
+
     pool_dir = os.path.join(args.log_dir, f"{args.run_name}_pool") if args.self_play else None
     record_path = (os.path.join(args.log_dir, f"{args.run_name}_episodes")
                    if args.record_every else None)
@@ -304,7 +324,8 @@ def main():
                         record_path, args.record_every or 1,
                         rich_obs=args.rich_obs, dmg_scale=args.dmg_scale,
                         elixir_scale=args.elixir_scale,
-                        script_names=tuple(args.scripts.split(",")))
+                        script_names=script_names, script_weights=script_weights,
+                        script_share=args.script_share)
                for i in range(args.n_envs)]
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 
