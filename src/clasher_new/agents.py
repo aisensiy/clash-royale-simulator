@@ -18,6 +18,7 @@ import zipfile
 
 from environment import N_SLOTS, random_strategy, rich_obs_for
 from scripts_defender import make_anchor, make_defender
+from scripts_sniper import make_sniper
 
 
 def idle_strategy(observation):
@@ -52,6 +53,9 @@ SCRIPTS = {
     "rusher": make_rusher,
     "defender": make_defender,
     "anchor": make_anchor,
+    # Held out of training on purpose -- see scripts_sniper.py. Do not add it to the
+    # builders in train.py.
+    "sniper": make_sniper,
 }
 
 
