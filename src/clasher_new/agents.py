@@ -9,6 +9,7 @@ Agents returned here are callables `act(observation, masks=None)`. They carry tw
 attributes the caller needs in order to build a matching environment:
 
     act.rich_obs   this side wants the clock/crowns/opponent-elixir/card-count inputs
+    act.count_obs  this side wants the two per-cell unit-count channels
     act.masked     this side must be handed `env.action_masks(player)` every decision
 """
 import json
@@ -16,7 +17,7 @@ import os
 import random
 import zipfile
 
-from environment import N_SLOTS, random_strategy, rich_obs_for
+from environment import N_SLOTS, count_obs_for, random_strategy, rich_obs_for
 from scripts_defender import make_anchor, make_defender
 from scripts_counter import make_counter
 from scripts_sniper import make_sniper
@@ -81,6 +82,9 @@ def load_agent(spec, deterministic=False):
         act = SCRIPTS[spec]()
         wrapped = lambda obs, masks=None: act(obs)
         wrapped.rich_obs = False
+        # Scripts read fixed channel indices and were tuned against the 15-channel grid.
+        # Leaving them on it keeps a ruler comparable with the ratings it gave last round.
+        wrapped.count_obs = False
         wrapped.masked = False
         wrapped.name = spec
         # A stateful script has to be told when a new game starts, or it carries the last
@@ -105,6 +109,7 @@ def load_agent(spec, deterministic=False):
             return model.predict(obs, deterministic=deterministic)[0]
 
     act.rich_obs = rich_obs_for(model)
+    act.count_obs = count_obs_for(model)
     act.masked = masked
     act.name = os.path.basename(spec)
     act.model = model

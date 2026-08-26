@@ -37,7 +37,11 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         self.context_dim = 64 if extra else 0
         self.context_mlp = (nn.Sequential(nn.Linear(extra, 64), nn.ReLU())
                             if extra else None)
-        self.in_channels = 13 + self.embedding_dim + 4
+        # Two of the grid channels are consumed rather than fed in: the entity id becomes
+        # an embedding and the card type a one-hot. Read the width off the space so that
+        # adding a channel to the observation does not need an edit here as well.
+        grid_channels = spaces_["grid"].shape[-1]
+        self.in_channels = (grid_channels - 2) + self.embedding_dim + 4
         self.cnn = nn.Sequential(
             nn.Conv2d(self.in_channels, 32, 3, padding=1), nn.ReLU(),
             nn.Conv2d(32, 64, 3, padding=1, stride=2), nn.ReLU(),
@@ -55,7 +59,7 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         Gets the observation, use the embedding (dim=8) to expand the channels, then use one-hot to further expand the channels.
         The code is ugly but should do the work.
         """
-        grid = observation['grid']  # (B, 32, 18, 15)
+        grid = observation['grid']  # (B, 32, 18, C)
         hand = observation['hand'].long()  # (B, 5)
         elixir = observation['elixir']
 
@@ -175,13 +179,14 @@ class RandomEvalCallback(BaseCallback):
     # `n_episodes * 370` sequential env steps. At 100k/20 that was eating about as much
     # wall clock as the training it was measuring; 500k/10 brings it under 10%.
     def __init__(self, every=500_000, n_episodes=10, use_masking=True, legacy_obs=False,
-                 rich_obs=False, verbose=0):
+                 rich_obs=False, count_obs=False, verbose=0):
         super().__init__(verbose)
         self.every = every
         self.n_episodes = n_episodes
         self.use_masking = use_masking
         self.legacy_obs = legacy_obs
         self.rich_obs = rich_obs
+        self.count_obs = count_obs
         self._next = None
 
     def _on_training_start(self):
@@ -193,7 +198,8 @@ class RandomEvalCallback(BaseCallback):
         self._next += self.every
         eval_env = DummyVecEnv([lambda: CREnv(opponent_model=random_strategy,
                                               legacy_obs=self.legacy_obs,
-                                              rich_obs=self.rich_obs)])
+                                              rich_obs=self.rich_obs,
+                                              count_obs=self.count_obs)])
         if self.use_masking:
             mean_reward, _ = maskable_evaluate_policy(
                 self.model, eval_env, n_eval_episodes=self.n_episodes,
@@ -207,7 +213,8 @@ class RandomEvalCallback(BaseCallback):
 
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
-             record_path=None, record_every=20, rich_obs=False, dmg_scale=1.0,
+             record_path=None, record_every=20, rich_obs=False, count_obs=False,
+             dmg_scale=1.0,
              elixir_scale=0.0, script_names=("random", "rusher"), script_weights=None,
              script_share=0.15):
     def _init():
@@ -237,7 +244,7 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
                                       masked=masked)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
                     record_path=record_path, record_every=record_every,
-                    rich_obs=rich_obs, dmg_scale=dmg_scale,
+                    rich_obs=rich_obs, count_obs=count_obs, dmg_scale=dmg_scale,
                     elixir_scale=elixir_scale)
         env.reset(seed=seed)
         return env
@@ -275,6 +282,12 @@ def main():
     parser.add_argument("--no-rich-obs", dest="rich_obs", action="store_false",
                         help="ablation: drop the clock/crowns/opponent-elixir/card-count inputs")
     parser.set_defaults(rich_obs=True)
+    # On by default for the same reason: `CREnv.observe` writes each unit into `obs[y][x]`,
+    # so three Minions on one cell read back as one Minion. How many bodies are in a push
+    # is not merely hard to learn from the old grid -- it is not in it.
+    parser.add_argument("--no-count-obs", dest="count_obs", action="store_false",
+                        help="ablation: drop the per-cell unit-count channels")
+    parser.set_defaults(count_obs=True)
     # Full tower damage is worth ~10.9 of shaping reward per game against a terminal win
     # bonus of 10, so trading badly still pays as long as something is being hit. Quartered,
     # the shaping keeps its role as a dense learning signal without outweighing the result.
@@ -322,7 +335,8 @@ def main():
                    if args.record_every else None)
     env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
                         record_path, args.record_every or 1,
-                        rich_obs=args.rich_obs, dmg_scale=args.dmg_scale,
+                        rich_obs=args.rich_obs, count_obs=args.count_obs,
+                        dmg_scale=args.dmg_scale,
                         elixir_scale=args.elixir_scale,
                         script_names=script_names, script_weights=script_weights,
                         script_share=args.script_share)
@@ -363,7 +377,8 @@ def main():
                       OpponentOutcomeCallback()]
     else:
         callbacks.append(RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs,
-                                            rich_obs=args.rich_obs))
+                                            rich_obs=args.rich_obs,
+                                            count_obs=args.count_obs))
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
                     tb_log_name=args.run_name, reset_num_timesteps=False)

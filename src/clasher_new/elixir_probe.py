@@ -53,7 +53,8 @@ def shard(args):
     torch.set_num_threads(1)
 
     agent = load_agent(path)
-    env = CREnv(opponent_model=make_rusher(seed), rich_obs=agent.rich_obs)
+    env = CREnv(opponent_model=make_rusher(seed), rich_obs=agent.rich_obs,
+                count_obs=agent.count_obs)
     elixir, tally, spent, played, seconds = [], Counter(), 0.0, 0, 0.0
     for i in range(games):
         env.learner_player = i % 2

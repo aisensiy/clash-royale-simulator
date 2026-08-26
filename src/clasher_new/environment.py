@@ -26,6 +26,12 @@ speed_types = [0, 0.75, 1.0, 1.5]
 ARENA_H, ARENA_W = 32, 18
 N_SLOTS = 5  # slot 0 is "do nothing", slots 1..4 are the four cards in hand
 N_CONTEXT = 8  # see CREnv.observe: the scalars a human reads off the screen
+# Per-cell channels. The first 15 describe *a* unit standing on the cell; because they are
+# written one unit at a time into the same slot, a cell holding three bodies keeps only the
+# last of them. The two count channels say how many are actually there -- see CREnv.observe.
+N_UNIT_CHANNELS = 15
+N_COUNT_CHANNELS = 2
+CH_OWN_COUNT, CH_ENEMY_COUNT = N_UNIT_CHANNELS, N_UNIT_CHANNELS + 1
 KING_TOWER_HP = 4824
 
 # What one unit of each card is worth, in elixir. A card that summons several bodies
@@ -77,7 +83,7 @@ class CREnv(gym.Env):
                  realtime=True, learner_player=None,
                  record_path=None, record_every=20,
                  rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0,
-                 elixir_scale=0.0):
+                 elixir_scale=0.0, count_obs=False, opponent_count_obs=None):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -96,13 +102,21 @@ class CREnv(gym.Env):
         # learner rather than the player id, since which side the learner takes changes
         # between episodes.
         self.rich_obs_opponent = rich_obs if opponent_rich_obs is None else opponent_rich_obs
+        # `count_obs` appends the two count channels. Without them a cell holding three
+        # Minions reads back as one Minion -- how many bodies are in a push is simply not
+        # in the input, so no amount of training can teach what a push is worth.
+        self.count_obs = count_obs
+        # Same reason the rich observation is served per side: the two encodings are
+        # different input widths, so a match between them has to hand each side its own.
+        self.count_obs_opponent = count_obs if opponent_count_obs is None else opponent_count_obs
         # Weight on the tower-damage shaping terms. At 1.0 the shaping available over a
         # full game (~10.9) rivals the terminal win bonus (10), which pays for constant
         # output regardless of whether the trade was good.
         self.dmg_scale = dmg_scale
         self.elixir_scale = elixir_scale
         spaces = {
-            "grid": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(ARENA_H, ARENA_W, 15), dtype=np.float32),
+            "grid": gym.spaces.Box(low=-np.inf, high=np.inf, dtype=np.float32,
+                                   shape=(ARENA_H, ARENA_W, self.n_grid_channels)),
             "hand": gym.spaces.Box(low=0, high=len(entity_names) - 1, shape=(5,), dtype=np.int32),
             "elixir": gym.spaces.Box(low=0.0, high=10.0, shape=(1,), dtype=np.float32),
         }
@@ -477,6 +491,10 @@ class CREnv(gym.Env):
                     self.visualizer.render_frame()
         return self.battle
 
+    @property
+    def n_grid_channels(self):
+        return N_UNIT_CHANNELS + (N_COUNT_CHANNELS if self.count_obs else 0)
+
     def observe(self, player_id_observe=0):
         """Gives an egocentric representation of the game state.
 
@@ -485,7 +503,9 @@ class CREnv(gym.Env):
         enemy. Player 1 therefore sees the arena point-reflected, which matches the action
         transform in `opponent_action`.
         """
-        obs = np.zeros((ARENA_H, ARENA_W, 15), dtype=np.float32)
+        counted = self.count_obs if player_id_observe == self.learner else self.count_obs_opponent
+        channels = N_UNIT_CHANNELS + (N_COUNT_CHANNELS if counted else 0)
+        obs = np.zeros((ARENA_H, ARENA_W, channels), dtype=np.float32)
         mirror = (player_id_observe == 1)
         for id, each in self.battle.entities.items():
             if not each.is_alive: continue
@@ -519,7 +539,13 @@ class CREnv(gym.Env):
                 y = ARENA_H - 1 - y
             obs_arr = np.array([entity_id, relative_player, elixir, card_type, speed, is_air, attacks_ground, attacks_air,
                                 hp_left, hp_percentage, hit_speed, attack_range, sight_range, damage, projectile_damage])
-            obs[y][x] = obs_arr.copy()
+            # The unit channels are written whole, so whoever lands on this cell last is
+            # the one described. The counts are added up instead, which is the only part of
+            # a stack of bodies that survives the overwrite.
+            obs[y][x][:N_UNIT_CHANNELS] = obs_arr
+            if counted:
+                obs[y][x][CH_ENEMY_COUNT if each.player != player_id_observe
+                          else CH_OWN_COUNT] += 1
 
         hand = np.array([entity_names.index(each) for each in self.battle.players[player_id_observe].cycle[:5]],
                         dtype=np.int32)
@@ -545,6 +571,18 @@ def rich_obs_for(model):
     """
     space = getattr(model, "observation_space", None)
     return "context" in getattr(space, "spaces", {})
+
+
+def count_obs_for(model):
+    """Whether this checkpoint was trained with the per-cell count channels.
+
+    Read off the width of the saved grid rather than passed around by hand, for the same
+    reason as `rich_obs_for`: handing a 15-channel checkpoint a 17-channel observation is
+    a shape error, and the reverse is a silently wrong measurement.
+    """
+    space = getattr(model, "observation_space", None)
+    grid = getattr(space, "spaces", {}).get("grid")
+    return bool(grid is not None and grid.shape[-1] >= N_UNIT_CHANNELS + N_COUNT_CHANNELS)
 
 
 def random_strategy(observation):

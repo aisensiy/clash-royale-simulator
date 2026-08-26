@@ -99,7 +99,9 @@ def test_the_grid_cannot_count_bodies_standing_on_one_cell():
     each other and only the last one survives. Three Minions from one card stand close
     enough to land on a single cell, and read back as one Minion -- which is why the swarm
     rule above counts occupied cells rather than bodies, and why it cannot fire on a stack.
-    Anything that needs to know how many bodies are there needs a count channel first."""
+    The count channels added in `test_count_channels.py` are what fixes this, but they are
+    served only to checkpoints trained on them: the scripts stay on the 15-channel grid so
+    that a rating this ruler gave last round still means the same thing."""
     obs = observation(elixir=10.0, enemy_at=[("Minions", far(3))])
     grid = obs["grid"]
     cells = np.nonzero((grid[:, :, 1] > 0.5) & (grid[:, :, 2] > 0))[0]
