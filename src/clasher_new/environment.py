@@ -97,34 +97,47 @@ UNIT_VALUE = {name: Card(name).elixir / Card(name).spawn_number
 KILL_SHARE = 0.5
 
 
-def _base_troop_legality():
-    """Cells where a troop may be deployed by player 0, ignoring buildings and tower state.
+def _base_troop_legality(player_id):
+    """Cells where a troop may be deployed, in `player_id`'s own egocentric frame.
 
     Mirrors the geometry checks in `BattleState.deploy_card`, which are evaluated on the
-    cell centre `Position(x + 0.5, y + 0.5)`. Returns (always_legal, needs_left_tower_down,
-    needs_right_tower_down) as boolean grids.
+    absolute position `CREnv.deploy` builds -- and the two players' checks there are *not*
+    reflections of one another. Red's forward band is one row deeper than blue's, and the
+    tower that opens a lane is named in absolute coordinates, so red's egocentric left is
+    gated by the enemy's right tower. Building the grids per player off the absolute
+    position is the only way to keep that straight; a mirrored copy of blue's grids opens
+    the wrong lane, which is exactly the bug this replaced. Returns (always_legal,
+    needs_enemy_left_tower_down, needs_enemy_right_tower_down) as boolean grids.
     """
     always = np.zeros((ARENA_H, ARENA_W), dtype=bool)
     left = np.zeros((ARENA_H, ARENA_W), dtype=bool)
     right = np.zeros((ARENA_H, ARENA_W), dtype=bool)
     for y in range(ARENA_H):
         for x in range(ARENA_W):
-            py, px = y + 0.5, x + 0.5
-            if py <= 1.0 and (px <= 6.0 or px > 12.0):
-                continue  # behind the king tower
-            if py >= 21.0:
-                continue  # never reachable, even with both princess towers down
-            if py >= 15.0:
-                if px <= 9:
-                    left[y][x] = True
-                else:
-                    right[y][x] = True
+            if player_id == 0:
+                py, px = y + 0.5, x + 0.5
+                if py <= 1.0 and (px <= 6.0 or px > 12.0):
+                    continue  # behind the king tower
+                if py >= 21.0:
+                    continue  # never reachable, even with both princess towers down
+                forward = py >= 15.0
             else:
+                py, px = ARENA_H - (y + 0.5), ARENA_W - (x + 0.5)
+                if py > 31.0 and (px <= 6.0 or px > 12.0):
+                    continue
+                if py <= 10.0:
+                    continue
+                forward = py <= 17.0
+            if not forward:
                 always[y][x] = True
+            elif px <= 9:
+                left[y][x] = True
+            else:
+                right[y][x] = True
     return always, left, right
 
 
-_TROOP_ALWAYS, _TROOP_NEEDS_LEFT, _TROOP_NEEDS_RIGHT = _base_troop_legality()
+_TROOP_LEGALITY = {p: _base_troop_legality(p) for p in (0, 1)}
 _ALL_CELLS = np.ones((ARENA_H, ARENA_W), dtype=bool)
 
 
@@ -298,11 +311,12 @@ class CREnv(gym.Env):
         if Card(card_name).type == 'spell':
             return _ALL_CELLS  # spells may target the whole arena
         enemy = self.battle.players[1 - player_id]
-        legal = _TROOP_ALWAYS.copy()
+        always, needs_left, needs_right = _TROOP_LEGALITY[player_id]
+        legal = always.copy()
         if enemy.left_tower_hp <= 0:
-            legal |= _TROOP_NEEDS_LEFT
+            legal |= needs_left
         if enemy.right_tower_hp <= 0:
-            legal |= _TROOP_NEEDS_RIGHT
+            legal |= needs_right
         return legal & ~blocked
 
     def action_masks(self, player_id=None):

@@ -92,14 +92,36 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
 
 
 class SpatialActionHead(nn.Module):
-    """Logits over the joint action space, with one set of weights shared by every cell.
+    """The joint action space in two levels: play or wait, and then what and where.
 
-    A plain `Linear(latent, N_FLAT_ACTIONS)` gives each of the 576 cells its own
-    parameters and no way to carry anything learned on one cell over to the one beside
-    it, which is a lot to ask of the same rollouts that also have to learn what to play.
-    This runs a small convolution over the arena at full resolution, conditioned on a
-    projection of the trunk's output, and reads off one plane of logits per card slot.
-    "Do nothing" is the single outcome with no cell, so it gets its own scalar.
+    Cells share weights. A plain `Linear(latent, N_FLAT_ACTIONS)` gives each of the 576
+    cells its own parameters and no way to carry anything learned on one cell over to the
+    one beside it, which is a lot to ask of the same rollouts that also have to learn what
+    to play. This runs a small convolution over the arena at full resolution, conditioned
+    on a projection of the trunk's output, and reads off one plane of logits per card
+    slot.
+
+    Waiting does not share that softmax, and the first run of this head is why. With one
+    "do nothing" outcome against 2304 placements, an untrained policy waits with
+    probability about 1/2304 instead of the 1/5 the factorised head started from. PPO
+    cannot learn a behaviour it never samples, so the arm spent twelve million steps
+    dumping cards the moment it could afford them -- 62 a game against the factorised
+    arm's 33, broke on 85% of its decisions -- and lost the head-to-head 17%. Holding
+    elixir is the hardest habit in this game to learn and the easiest to price out of the
+    distribution by accident.
+
+    So "play or wait" is its own sigmoid, and the placement softmax is conditioned on
+    having decided to play. The two levels are composed here into log-probabilities over
+    the same 2305 outcomes, which a categorical distribution reproduces exactly
+    (`log_softmax` of a log-probability vector is itself). Nothing downstream changes: the
+    action space, the codec, the mask and every checkpoint stay as they are, and the
+    sampling and entropy maths remain sb3-contrib's rather than ours.
+
+    Masking then renormalises across both levels, which is the behaviour we want -- with
+    few placements legal, waiting deserves more of the probability, and with none legal it
+    takes all of it. It also means the effective opening probability of waiting is well
+    above the 1/2 the sigmoid starts at, since the placements it competes with are only
+    the legal ones. Erring toward patience is the safe side of this particular mistake.
 
     The planes come from the features extractor rather than being recomputed: SB3 calls
     the extractor exactly once per forward pass, immediately before this head, and shares
@@ -118,11 +140,13 @@ class SpatialActionHead(nn.Module):
         self.mix = nn.Sequential(
             nn.Conv2d(width + cond_dim, width, 3, padding=1), nn.ReLU(),
             nn.Conv2d(width, N_SLOTS - 1, 1))
-        self.noop = nn.Linear(latent_dim, 1)
+        self.play = nn.Linear(latent_dim, 1)
         # SB3 initialises its action head at gain 0.01 so that the opening policy is close
         # to uniform and exploration is not decided by whatever the last layer happened to
         # be born as. The head super() built with that treatment is the one we replaced.
-        for layer in (self.mix[-1], self.noop):
+        # On `play` the same treatment means an opening coin flip between playing and
+        # waiting, before the mask tilts it further toward waiting.
+        for layer in (self.mix[-1], self.play):
             nn.init.orthogonal_(layer.weight, gain=0.01)
             nn.init.constant_(layer.bias, 0.0)
 
@@ -130,9 +154,14 @@ class SpatialActionHead(nn.Module):
         planes = self._extractor[0].last_planes
         cond = self.cond(latent)[:, :, None, None].expand(-1, -1, ARENA_H, ARENA_W)
         cells = self.mix(torch.cat([self.tower(planes), cond], dim=1))
-        # Slot-major, then row-major within a slot -- exactly how `decode_flat_action`
-        # reads an index back apart. Index 0 is "do nothing".
-        return torch.cat([self.noop(latent), cells.flatten(1)], dim=1)
+        play = self.play(latent)
+        # Log-probabilities, not free logits: index 0 carries P(wait) whole, and each
+        # placement carries P(play) times its share of the placement softmax. Slot-major,
+        # then row-major within a slot -- exactly how `decode_flat_action` reads an index
+        # back apart.
+        return torch.cat([F.logsigmoid(-play),
+                          F.logsigmoid(play) + F.log_softmax(cells.flatten(1), dim=1)],
+                         dim=1)
 
 
 class CRSpatialPolicy(MaskableActorCriticPolicy):

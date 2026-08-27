@@ -179,6 +179,30 @@ def test_the_factorised_mask_cannot_be_exact_and_the_joint_one_is():
         assert not new[encode_flat_action(slot, y, x)], f"({y},{x}) still offered"
 
 
+@pytest.mark.parametrize("learner", [0, 1])
+@pytest.mark.parametrize("towers", [(1, 1), (0, 1), (1, 0), (0, 0)])
+def test_the_mask_agrees_with_the_simulator_cell_by_cell(learner, towers):
+    """Every card, every cell, both sides, every tower state, against the simulator.
+
+    Red's deploy checks are not a reflection of blue's -- its forward band reaches a row
+    deeper, and the tower that opens a lane is named in absolute coordinates, so red's
+    egocentric left is gated by the enemy's *right* tower. Sharing one grid between the
+    players opened the wrong lane for red the moment a princess tower fell, which cost
+    2.5% of its placements and went unseen for four rounds because the per-dimension mask
+    was too coarse to show it.
+    """
+    env = started(elixir=10.0, learner=learner)
+    foe = env.battle.players[1 - learner]
+    foe.left_tower_hp = 1000.0 if towers[0] else 0.0
+    foe.right_tower_hp = 1000.0 if towers[1] else 0.0
+    mask = env.action_masks(learner)
+    wrong = [(s, y, x) for s, y, x in every_action() if s
+             and bool(mask[encode_flat_action(s, y, x)])
+             != legal_by_simulation(env, learner, s, y, x)]
+    assert not wrong, (f"{len(wrong)} cells disagree as player {learner} with towers "
+                       f"{towers}, e.g. {wrong[:4]}")
+
+
 def test_a_spell_may_go_where_a_troop_may_not():
     """Two cards, two different sets of legal cells, one mask. The factorised encoding
     has to take their union and hand both cards the larger one."""
@@ -264,16 +288,70 @@ def test_a_script_is_not_on_the_joint_space():
     assert load_agent("counter").flat_action is False
 
 
-def test_the_spatial_head_outputs_one_logit_per_action():
-    """And it has to run off the same planes the trunk sees, in the same forward pass."""
+def head_and_logits():
     torch = pytest.importorskip("torch")
     from train import CRFeatureExtractor, SpatialActionHead
     env = CREnv(opponent_model=random_strategy, flat_action=True, count_obs=True)
     obs, _ = env.reset(seed=1)
     extractor = CRFeatureExtractor(env.observation_space)
     batch = {k: torch.as_tensor(np.asarray(v)[None]) for k, v in obs.items()}
-    latent = extractor(batch)
     head = SpatialActionHead(extractor.features_dim, extractor)
-    logits = head(latent)
+    return torch, head, head(extractor(batch)), batch
+
+
+def test_the_spatial_head_outputs_one_logit_per_action():
+    """And it has to run off the same planes the trunk sees, in the same forward pass."""
+    torch, _, logits, _ = head_and_logits()
     assert logits.shape == (1, N_FLAT_ACTIONS)
     assert torch.isfinite(logits).all()
+
+
+def test_the_head_emits_log_probabilities():
+    """The two levels are composed into one vector over the same 2305 outcomes, which
+    only reproduces the intended distribution if that vector is already normalised --
+    `log_softmax` of a log-probability vector is itself."""
+    torch, _, logits, _ = head_and_logits()
+    assert torch.logsumexp(logits, dim=1).abs().max() < 1e-4
+
+
+def test_waiting_starts_at_a_coin_flip_and_not_at_one_in_2305():
+    """The defect that cost the first run of this head. With "do nothing" as one outcome
+    among 2304 placements, an untrained policy waits about 0.04% of the time, never
+    samples patience, and so cannot learn it."""
+    torch, _, logits, _ = head_and_logits()
+    p_wait = float(logits[0, 0].exp())
+    assert 0.3 < p_wait < 0.7, f"opening wait probability {p_wait:.4f}"
+
+
+def test_the_two_levels_are_independent_of_each_other():
+    """Where to play is decided as if the decision to play had already been taken, so
+    moving the play/wait split must not reorder placements or change their relative
+    weights."""
+    torch, head, before, batch = head_and_logits()
+    ratio_before = before[0, 1:] - before[0, 1:].logsumexp(0)
+    with torch.no_grad():
+        head.play.bias.add_(3.0)          # much keener to play
+    after = head(head._extractor[0](batch))
+    assert float(after[0, 0].exp()) < float(before[0, 0].exp()), "the split did not move"
+    ratio_after = after[0, 1:] - after[0, 1:].logsumexp(0)
+    assert torch.allclose(ratio_before, ratio_after, atol=1e-5)
+
+
+def test_masking_moves_probability_onto_waiting():
+    """Renormalising across both levels is the behaviour we want: with few placements
+    legal, waiting deserves more of the distribution, and with none legal it takes all."""
+    torch, _, logits, _ = head_and_logits()
+    row = logits[0]
+
+    def wait_probability(mask):
+        masked = torch.where(torch.as_tensor(mask), row, torch.full_like(row, -np.inf))
+        return float(torch.softmax(masked, dim=0)[0])
+
+    everything = np.ones(N_FLAT_ACTIONS, dtype=bool)
+    a_few = np.zeros(N_FLAT_ACTIONS, dtype=bool)
+    a_few[0] = True
+    a_few[1:20] = True
+    nothing_but_waiting = np.zeros(N_FLAT_ACTIONS, dtype=bool)
+    nothing_but_waiting[0] = True
+    assert wait_probability(everything) < wait_probability(a_few)
+    assert wait_probability(nothing_but_waiting) == pytest.approx(1.0)
