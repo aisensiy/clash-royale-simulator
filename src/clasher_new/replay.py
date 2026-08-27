@@ -90,7 +90,8 @@ def main():
     # keys its network has no input layer for dies on the first prediction.
     env = CREnv(opponent_model=red, visualize=True, realtime=False, learner_player=0,
                 rich_obs=blue.rich_obs, opponent_rich_obs=red.rich_obs,
-                count_obs=blue.count_obs, opponent_count_obs=red.count_obs)
+                count_obs=blue.count_obs, opponent_count_obs=red.count_obs,
+                flat_action=blue.flat_action, opponent_flat_action=red.flat_action)
     obs, _ = env.reset(seed=args.seed)
 
     frames, log = [], []

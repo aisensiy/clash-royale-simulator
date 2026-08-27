@@ -32,7 +32,57 @@ N_CONTEXT = 8  # see CREnv.observe: the scalars a human reads off the screen
 N_UNIT_CHANNELS = 15
 N_COUNT_CHANNELS = 2
 CH_OWN_COUNT, CH_ENEMY_COUNT = N_UNIT_CHANNELS, N_UNIT_CHANNELS + 1
+# The flat action space: "do nothing", then one outcome per (card, cell) pair.
+# `MultiDiscrete([N_SLOTS, ARENA_H, ARENA_W])` factorises a placement into an
+# independent row and an independent column, and the policy's distribution over cells is
+# then their outer product. It cannot say "either (3,5) or (20,12)" without also putting
+# weight on (3,12) and (20,5); and the mask, which sb3-contrib takes per dimension, can
+# only say "some cell in row 3 is legal", never "this card may go on this cell". 2305
+# outcomes is small enough to model jointly, which removes both problems at once.
+N_CELLS = ARENA_H * ARENA_W
+N_FLAT_ACTIONS = 1 + (N_SLOTS - 1) * N_CELLS
 KING_TOWER_HP = 4824
+
+
+def decode_flat_action(action):
+    """A single index back into the `(slot, y, x)` triple the simulator deploys."""
+    index = int(action)
+    if index <= 0:
+        return 0, 0, 0
+    index -= 1
+    slot, cell = divmod(index, N_CELLS)
+    y, x = divmod(cell, ARENA_W)
+    return slot + 1, y, x
+
+
+def encode_flat_action(slot, y, x):
+    """The inverse, for tests and for replaying a recorded triple through a flat policy."""
+    if int(slot) == 0:
+        return 0
+    return 1 + (int(slot) - 1) * N_CELLS + int(y) * ARENA_W + int(x)
+
+
+def action_triple(action, flat_action):
+    """Whatever the acting side's policy produced, as the `(slot, y, x)` a deploy needs.
+
+    The two action encodings meet here and nowhere else, which is also why the eval tools
+    that break an action apart call this rather than indexing it.
+    """
+    if flat_action:
+        return decode_flat_action(action)
+    return tuple(int(a) for a in action)
+
+
+def flat_action_for(model):
+    """Whether this checkpoint was trained on the joint action space.
+
+    Read off the saved action space for the same reason as `count_obs_for`: the eval
+    tools load checkpoints from several runs at once, and a side handed the wrong action
+    encoding does not crash -- it deploys the wrong card in the wrong place.
+    """
+    space = getattr(model, "action_space", None)
+    return bool(getattr(space, "n", None) == N_FLAT_ACTIONS)
+
 
 # What one unit of each card is worth, in elixir. A card that summons several bodies
 # splits its cost between them, or a Minions deploy would read as 9 elixir of value for
@@ -83,7 +133,8 @@ class CREnv(gym.Env):
                  realtime=True, learner_player=None,
                  record_path=None, record_every=20,
                  rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0,
-                 elixir_scale=0.0, count_obs=False, opponent_count_obs=None):
+                 elixir_scale=0.0, count_obs=False, opponent_count_obs=None,
+                 flat_action=False, opponent_flat_action=None):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -112,6 +163,19 @@ class CREnv(gym.Env):
         # Weight on the tower-damage shaping terms. At 1.0 the shaping available over a
         # full game (~10.9) rivals the terminal win bonus (10), which pays for constant
         # output regardless of whether the trade was good.
+        # `flat_action` swaps the factorised action space for the joint one. See
+        # `N_FLAT_ACTIONS`: it is what lets the mask be exact per cell.
+        self.flat_action = flat_action
+        # Per side, for the same reason as the observation flags -- a run on the joint
+        # action space and a run on the factorised one have to be able to play each other,
+        # which is the only way to know whether the change was worth making. Unlike those
+        # flags the default is *not* to mirror the learner: an observation is something
+        # this env produces, so serving the opponent whatever the learner gets is at worst
+        # useless, while an action is something it consumes, and reading a `(slot, y, x)`
+        # triple as an index deploys a different card somewhere else without erroring.
+        # Every opponent that does speak the joint space says so -- see
+        # `opponent_flat_action` -- and everything hand-written answers in triples.
+        self.flat_action_opponent = bool(opponent_flat_action)
         self.dmg_scale = dmg_scale
         self.elixir_scale = elixir_scale
         spaces = {
@@ -124,7 +188,8 @@ class CREnv(gym.Env):
             spaces["context"] = gym.spaces.Box(low=0.0, high=1.0, shape=(N_CONTEXT,), dtype=np.float32)
             spaces["opp_hand"] = gym.spaces.Box(low=0.0, high=1.0, shape=(len(DECK),), dtype=np.float32)
         self.observation_space = gym.spaces.Dict(spaces)
-        self.action_space = gym.spaces.MultiDiscrete([N_SLOTS, ARENA_H, ARENA_W])
+        self.action_space = (gym.spaces.Discrete(N_FLAT_ACTIONS) if flat_action
+                             else gym.spaces.MultiDiscrete([N_SLOTS, ARENA_H, ARENA_W]))
 
         self.visualize = visualize
         self.visualizer = None
@@ -202,6 +267,17 @@ class CREnv(gym.Env):
             self._plays[player_id].append(card_name)
         return played
 
+    @property
+    def opponent_flat_action(self):
+        """Which action encoding the opponent is playing right now.
+
+        A self-play pool holds checkpoints and scripts side by side, and a script emits a
+        `(slot, y, x)` triple whatever encoding the run itself uses. So an opponent that
+        knows its own answer gets to give it, exactly like `masked`; the constructor value
+        is the fallback for the eval tools, which load one fixed opponent.
+        """
+        return getattr(self.opponent, "flat_action", self.flat_action_opponent)
+
     def opponent_action(self):
         opponent = 1 - self.learner
         observation = self.observe(opponent)
@@ -213,49 +289,71 @@ class CREnv(gym.Env):
             action = self.opponent(observation, self.action_masks(opponent))
         else:
             action = self.opponent(observation)
+        action = action_triple(action, self.opponent_flat_action)
         self.deploy(opponent, action)
         return action
 
-    def action_masks(self, player_id=None):
-        """Boolean mask over the three action dimensions, concatenated: [slot | y | x].
+    def _legal_cells(self, player_id, card_name, blocked):
+        """Where this one card may be placed, in the acting player's own frame."""
+        if Card(card_name).type == 'spell':
+            return _ALL_CELLS  # spells may target the whole arena
+        enemy = self.battle.players[1 - player_id]
+        legal = _TROOP_ALWAYS.copy()
+        if enemy.left_tower_hp <= 0:
+            legal |= _TROOP_NEEDS_LEFT
+        if enemy.right_tower_hp <= 0:
+            legal |= _TROOP_NEEDS_RIGHT
+        return legal & ~blocked
 
-        MultiDiscrete masks are per-dimension, so a joint constraint ("this card may go
-        here") cannot be expressed exactly -- the position mask is the union over every
-        currently playable card. Elixir, which accounts for the overwhelming majority of
-        rejected actions, *is* masked exactly because it depends only on the slot.
+    def action_masks(self, player_id=None):
+        """Which actions are legal right now, in whichever encoding this side plays.
+
+        On the joint action space the mask is exact: one bool per `(card, cell)` pair, so
+        a troop is never offered a cell across the river and a spell is never denied one.
+        On the factorised space it cannot be -- sb3-contrib takes one mask per dimension,
+        so a joint constraint ("this card may go here") has no way to be expressed and the
+        position mask is the union over every currently playable card. Elixir, which
+        accounts for the overwhelming majority of rejected actions, is exact either way
+        because it depends only on the slot.
         """
         if player_id is None:
             player_id = self.learner
+        flat = self.flat_action if player_id == self.learner else self.opponent_flat_action
         p = self.battle.players[player_id]
-        enemy = self.battle.players[1 - player_id]
 
         slot_mask = np.zeros(N_SLOTS, dtype=bool)
         slot_mask[0] = True  # doing nothing is always available
-        playable = []
+        playable = {}
         for i in range(1, N_SLOTS):
             card_name = p.cycle[i - 1]
             if p.can_play_card(card_name):
                 slot_mask[i] = True
-                playable.append(card_name)
+                playable[i] = card_name
+
+        # The mask is built in player 0's frame, so red's view of it is point-reflected.
+        blocked = self._building_cells()
+        if player_id == 1:
+            blocked = blocked[::-1, ::-1]
+
+        if flat:
+            mask = np.zeros(N_FLAT_ACTIONS, dtype=bool)
+            mask[0] = True
+            for slot, card_name in playable.items():
+                start = 1 + (slot - 1) * N_CELLS
+                mask[start:start + N_CELLS] = self._legal_cells(
+                    player_id, card_name, blocked).ravel()
+            return mask
 
         if not playable:
+            # Every position is offered rather than none: a dimension with no legal value
+            # at all is not something the masked distribution can be asked to sample from.
             return np.concatenate([slot_mask,
                                    np.ones(ARENA_H, dtype=bool),
                                    np.ones(ARENA_W, dtype=bool)])
 
-        if any(Card(name).type == 'spell' for name in playable):
-            legal = _ALL_CELLS  # spells may target the whole arena
-        else:
-            legal = _TROOP_ALWAYS.copy()
-            if enemy.left_tower_hp <= 0:
-                legal |= _TROOP_NEEDS_LEFT
-            if enemy.right_tower_hp <= 0:
-                legal |= _TROOP_NEEDS_RIGHT
-            blocked = self._building_cells()
-            if player_id == 1:
-                blocked = blocked[::-1, ::-1]  # the mask is built in player 0's frame
-            legal = legal & ~blocked
-
+        legal = np.zeros((ARENA_H, ARENA_W), dtype=bool)
+        for slot, card_name in playable.items():
+            legal |= self._legal_cells(player_id, card_name, blocked)
         return np.concatenate([slot_mask, legal.any(axis=1), legal.any(axis=0)])
 
     def _army_value(self, player_id):
@@ -384,6 +482,7 @@ class CREnv(gym.Env):
         The opponent is a function that takes in the observation and outputs the action tuple.
         """
 
+        action = action_triple(action, self.flat_action)
         me = self.battle.players[self.learner]
         foe = self.battle.players[1 - self.learner]
         my_hps_old = me.king_tower_hp+me.left_tower_hp+me.right_tower_hp

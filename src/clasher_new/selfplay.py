@@ -120,11 +120,12 @@ class PooledOpponent:
     """
 
     def __init__(self, pool, scripts, algo, refresh_every=10, seed=0, device="cpu",
-                 masked=False):
+                 masked=False, flat_action=False):
         self.pool = pool
         self.scripts = scripts          # name -> callable(observation) -> action
         self.algo = algo                # PPO or MaskablePPO
         self._masked = masked
+        self._flat_action = flat_action
         self.refresh_every = refresh_every
         self.device = device
         self.rng = random.Random(seed)
@@ -145,6 +146,15 @@ class PooledOpponent:
         masked run, so this follows whichever opponent is currently loaded.
         """
         return self._masked and self._script is None
+
+    @property
+    def flat_action(self):
+        """Whether the currently loaded opponent speaks the joint action space.
+
+        Snapshots of the learner do; the scripts never do, whatever the run is training
+        on. Read per decision by `CREnv.opponent_flat_action`.
+        """
+        return self._flat_action and self._script is None
 
     def on_episode_start(self):
         # Scripts may carry state between decisions; forward the hook so a half-finished

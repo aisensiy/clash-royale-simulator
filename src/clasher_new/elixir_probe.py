@@ -20,7 +20,7 @@ import numpy as np
 
 from agents import decide, load_agent, make_rusher
 from card_utils import Card
-from environment import CREnv
+from environment import CREnv, action_triple
 
 STARTING_ELIXIR = 5.0
 
@@ -54,7 +54,7 @@ def shard(args):
 
     agent = load_agent(path)
     env = CREnv(opponent_model=make_rusher(seed), rich_obs=agent.rich_obs,
-                count_obs=agent.count_obs)
+                count_obs=agent.count_obs, flat_action=agent.flat_action)
     elixir, tally, spent, played, seconds = [], Counter(), 0.0, 0, 0.0
     for i in range(games):
         env.learner_player = i % 2
@@ -65,7 +65,7 @@ def shard(args):
             before = me.elixir
             elixir.append(before)
             action = decide(agent, obs, env, env.learner)
-            slot = int(action[0])
+            slot, _, _ = action_triple(action, agent.flat_action)
             if slot == 0:
                 tally["chose to wait"] += 1
                 obs, _, done, _, _ = env.step(action)

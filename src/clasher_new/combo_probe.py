@@ -19,7 +19,7 @@ import numpy as np
 
 from agents import decide, load_agent, make_rusher
 from card_utils import Card
-from environment import CREnv
+from environment import CREnv, action_triple
 
 WINDOW = 2.0     # seconds; four decisions
 RADIUS = 4.0     # tiles
@@ -32,7 +32,7 @@ def shard(args):
 
     agent = load_agent(path)
     env = CREnv(opponent_model=make_rusher(seed), rich_obs=agent.rich_obs,
-                count_obs=agent.count_obs)
+                count_obs=agent.count_obs, flat_action=agent.flat_action)
     sizes, peak_elixir, played_games = Counter(), 0.0, 0
     for i in range(games):
         env.learner_player = i % 2
@@ -44,13 +44,13 @@ def shard(args):
             before = me.elixir
             peak_elixir = max(peak_elixir, before)
             action = decide(agent, obs, env, env.learner)
-            slot = int(action[0])
+            slot, row, col = action_triple(action, agent.flat_action)
             card = me.cycle[slot - 1] if slot else None
             obs, _, done, _, _ = env.step(action)
             if card is None or env.battle.players[env.learner].elixir >= before:
                 continue                       # nothing was actually placed
             now = env.battle.time
-            here = np.array([int(action[2]), int(action[1])], dtype=float)
+            here = np.array([col, row], dtype=float)
             if (last is not None and now - last[0] <= WINDOW
                     and np.linalg.norm(here - last[1]) <= RADIUS):
                 group.append(Card(card).elixir)

@@ -5,19 +5,21 @@ which makes a masked run and an unmasked run impossible to play against each oth
 checkpoint already records which algorithm wrote it and which observation keys its
 network has input layers for, so nothing has to be declared on the command line.
 
-Agents returned here are callables `act(observation, masks=None)`. They carry two
+Agents returned here are callables `act(observation, masks=None)`. They carry the
 attributes the caller needs in order to build a matching environment:
 
-    act.rich_obs   this side wants the clock/crowns/opponent-elixir/card-count inputs
-    act.count_obs  this side wants the two per-cell unit-count channels
-    act.masked     this side must be handed `env.action_masks(player)` every decision
+    act.rich_obs     this side wants the clock/crowns/opponent-elixir/card-count inputs
+    act.count_obs    this side wants the two per-cell unit-count channels
+    act.flat_action  this side speaks the joint action space, not `(slot, y, x)`
+    act.masked       this side must be handed `env.action_masks(player)` every decision
 """
 import json
 import os
 import random
 import zipfile
 
-from environment import N_SLOTS, count_obs_for, random_strategy, rich_obs_for
+from environment import (N_SLOTS, count_obs_for, flat_action_for, random_strategy,
+                         rich_obs_for)
 from scripts_defender import make_anchor, make_defender
 from scripts_counter import make_counter
 from scripts_sniper import make_sniper
@@ -85,6 +87,8 @@ def load_agent(spec, deterministic=False):
         # Scripts read fixed channel indices and were tuned against the 15-channel grid.
         # Leaving them on it keeps a ruler comparable with the ratings it gave last round.
         wrapped.count_obs = False
+        # Scripts answer with a `(slot, y, x)` triple whatever the run trains on.
+        wrapped.flat_action = False
         wrapped.masked = False
         wrapped.name = spec
         # A stateful script has to be told when a new game starts, or it carries the last
@@ -110,6 +114,7 @@ def load_agent(spec, deterministic=False):
 
     act.rich_obs = rich_obs_for(model)
     act.count_obs = count_obs_for(model)
+    act.flat_action = flat_action_for(model)
     act.masked = masked
     act.name = os.path.basename(spec)
     act.model = model

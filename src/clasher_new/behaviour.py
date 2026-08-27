@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from agents import SCRIPTS, decide, load_agent
 from card_utils import Card
-from environment import ARENA_W, CREnv
+from environment import ARENA_W, CREnv, action_triple
 
 
 def _shard(args):
@@ -23,7 +23,8 @@ def _shard(args):
     foe = load_agent(opponent_spec)
     env = CREnv(opponent_model=foe, rich_obs=act.rich_obs,
                 opponent_rich_obs=foe.rich_obs, count_obs=act.count_obs,
-                opponent_count_obs=foe.count_obs)
+                opponent_count_obs=foe.count_obs, flat_action=act.flat_action,
+                opponent_flat_action=foe.flat_action)
     columns = Counter()
     elixir_left, plays, wins, total = [], 0, 0, 0
     for i in range(games):
@@ -32,7 +33,7 @@ def _shard(args):
         done = False
         while not done:
             action = decide(act, obs, env, env.learner)
-            slot, y, x = int(action[0]), int(action[1]), int(action[2])
+            slot, y, x = action_triple(action, act.flat_action)
             if slot != 0:
                 card = env.battle.players[env.learner].cycle[slot - 1]
                 before = env.battle.players[env.learner].elixir

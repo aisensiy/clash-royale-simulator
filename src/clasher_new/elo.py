@@ -33,7 +33,8 @@ def play_match(args):
     red = load_agent(red_spec)
     env = CREnv(opponent_model=red, rich_obs=blue.rich_obs,
                 opponent_rich_obs=red.rich_obs, count_obs=blue.count_obs,
-                opponent_count_obs=red.count_obs)
+                opponent_count_obs=red.count_obs, flat_action=blue.flat_action,
+                opponent_flat_action=red.flat_action)
     score = 0.0
     for i in range(games):
         # Half the games from each side, so the arena's own bias cancels instead of

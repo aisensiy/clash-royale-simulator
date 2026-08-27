@@ -5,12 +5,14 @@ import time
 from agents import make_rusher
 from scripts_defender import make_defender
 from scripts_sniper import make_sniper
-from environment import CREnv, random_strategy, entity_names
+from environment import (ARENA_H, ARENA_W, CREnv, N_FLAT_ACTIONS, N_SLOTS,
+                         entity_names, random_strategy)
 from selfplay import OpponentPool, PooledOpponent
 
 from gymnasium import spaces
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.evaluation import evaluate_policy as maskable_evaluate_policy
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
@@ -73,6 +75,10 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         rest = x[..., 1:]
         x = torch.cat([rest, card_type_oh], dim=-1)
         x = x.permute(0, 3, 1, 2).float()  # (B, C, 32, 18)
+        # Kept for `SpatialActionHead`, which needs the arena at full resolution and runs
+        # in the same forward pass. SB3 calls this extractor once per pass and shares it
+        # between the policy and the value function, so there is exactly one live value.
+        self.last_planes = x
 
         grid_feat = self.cnn(x)
 
@@ -83,6 +89,67 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
                              observation['opp_hand'].float()], dim=1)
             parts.append(self.context_mlp(ctx))
         return torch.relu(self.fc(torch.cat(parts, dim=1)))
+
+
+class SpatialActionHead(nn.Module):
+    """Logits over the joint action space, with one set of weights shared by every cell.
+
+    A plain `Linear(latent, N_FLAT_ACTIONS)` gives each of the 576 cells its own
+    parameters and no way to carry anything learned on one cell over to the one beside
+    it, which is a lot to ask of the same rollouts that also have to learn what to play.
+    This runs a small convolution over the arena at full resolution, conditioned on a
+    projection of the trunk's output, and reads off one plane of logits per card slot.
+    "Do nothing" is the single outcome with no cell, so it gets its own scalar.
+
+    The planes come from the features extractor rather than being recomputed: SB3 calls
+    the extractor exactly once per forward pass, immediately before this head, and shares
+    it between the policy and the value function.
+    """
+
+    def __init__(self, latent_dim, extractor, cond_dim=32, width=48):
+        super().__init__()
+        # In a list so the extractor is not registered as a submodule of the head as well
+        # as of the policy. It would still be optimised once either way, but it would
+        # appear twice in the module tree and in anything that walks it.
+        self._extractor = [extractor]
+        self.cond = nn.Linear(latent_dim, cond_dim)
+        self.tower = nn.Sequential(
+            nn.Conv2d(extractor.in_channels, width, 3, padding=1), nn.ReLU())
+        self.mix = nn.Sequential(
+            nn.Conv2d(width + cond_dim, width, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(width, N_SLOTS - 1, 1))
+        self.noop = nn.Linear(latent_dim, 1)
+        # SB3 initialises its action head at gain 0.01 so that the opening policy is close
+        # to uniform and exploration is not decided by whatever the last layer happened to
+        # be born as. The head super() built with that treatment is the one we replaced.
+        for layer in (self.mix[-1], self.noop):
+            nn.init.orthogonal_(layer.weight, gain=0.01)
+            nn.init.constant_(layer.bias, 0.0)
+
+    def forward(self, latent):
+        planes = self._extractor[0].last_planes
+        cond = self.cond(latent)[:, :, None, None].expand(-1, -1, ARENA_H, ARENA_W)
+        cells = self.mix(torch.cat([self.tower(planes), cond], dim=1))
+        # Slot-major, then row-major within a slot -- exactly how `decode_flat_action`
+        # reads an index back apart. Index 0 is "do nothing".
+        return torch.cat([self.noop(latent), cells.flatten(1)], dim=1)
+
+
+class CRSpatialPolicy(MaskableActorCriticPolicy):
+    """`MaskableActorCriticPolicy` with the flat action space read off the arena.
+
+    Only the action head differs from the stock policy: the distribution stays the
+    ordinary masked categorical over `N_FLAT_ACTIONS` outcomes, so none of the sampling,
+    log-probability or entropy maths is ours to get wrong.
+    """
+
+    def _build(self, lr_schedule):
+        super()._build(lr_schedule)
+        self.action_net = SpatialActionHead(self.mlp_extractor.latent_dim_pi,
+                                            self.features_extractor)
+        # The optimizer super() built closed over the head it replaced.
+        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1),
+                                              **self.optimizer_kwargs)
 
 
 class ThroughputCallback(BaseCallback):
@@ -179,7 +246,7 @@ class RandomEvalCallback(BaseCallback):
     # `n_episodes * 370` sequential env steps. At 100k/20 that was eating about as much
     # wall clock as the training it was measuring; 500k/10 brings it under 10%.
     def __init__(self, every=500_000, n_episodes=10, use_masking=True, legacy_obs=False,
-                 rich_obs=False, count_obs=False, verbose=0):
+                 rich_obs=False, count_obs=False, flat_action=False, verbose=0):
         super().__init__(verbose)
         self.every = every
         self.n_episodes = n_episodes
@@ -187,6 +254,7 @@ class RandomEvalCallback(BaseCallback):
         self.legacy_obs = legacy_obs
         self.rich_obs = rich_obs
         self.count_obs = count_obs
+        self.flat_action = flat_action
         self._next = None
 
     def _on_training_start(self):
@@ -199,7 +267,8 @@ class RandomEvalCallback(BaseCallback):
         eval_env = DummyVecEnv([lambda: CREnv(opponent_model=random_strategy,
                                               legacy_obs=self.legacy_obs,
                                               rich_obs=self.rich_obs,
-                                              count_obs=self.count_obs)])
+                                              count_obs=self.count_obs,
+                                              flat_action=self.flat_action)])
         if self.use_masking:
             mean_reward, _ = maskable_evaluate_policy(
                 self.model, eval_env, n_eval_episodes=self.n_episodes,
@@ -214,7 +283,7 @@ class RandomEvalCallback(BaseCallback):
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
              record_path=None, record_every=20, rich_obs=False, count_obs=False,
-             dmg_scale=1.0,
+             flat_action=False, dmg_scale=1.0,
              elixir_scale=0.0, script_names=("random", "rusher"), script_weights=None,
              script_share=0.15):
     def _init():
@@ -241,10 +310,11 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
                                 p_history=history, p_script=script_share)
             opponent = PooledOpponent(pool, scripts, algo,
                                       refresh_every=refresh_every, seed=seed,
-                                      masked=masked)
+                                      masked=masked, flat_action=flat_action)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
                     record_path=record_path, record_every=record_every,
-                    rich_obs=rich_obs, count_obs=count_obs, dmg_scale=dmg_scale,
+                    rich_obs=rich_obs, count_obs=count_obs,
+                    flat_action=flat_action, dmg_scale=dmg_scale,
                     elixir_scale=elixir_scale)
         env.reset(seed=seed)
         return env
@@ -288,6 +358,10 @@ def main():
     parser.add_argument("--no-count-obs", dest="count_obs", action="store_false",
                         help="ablation: drop the per-cell unit-count channels")
     parser.set_defaults(count_obs=True)
+    parser.add_argument("--no-flat-action", dest="flat_action", action="store_false",
+                        help="ablation: keep the factorised (slot, row, column) action "
+                             "space instead of the joint one")
+    parser.set_defaults(flat_action=True)
     # Full tower damage is worth ~10.9 of shaping reward per game against a terminal win
     # bonus of 10, so trading badly still pays as long as something is being hit. Quartered,
     # the shaping keeps its role as a dense learning signal without outweighing the result.
@@ -336,7 +410,7 @@ def main():
     env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
                         record_path, args.record_every or 1,
                         rich_obs=args.rich_obs, count_obs=args.count_obs,
-                        dmg_scale=args.dmg_scale,
+                        flat_action=args.flat_action, dmg_scale=args.dmg_scale,
                         elixir_scale=args.elixir_scale,
                         script_names=script_names, script_weights=script_weights,
                         script_share=args.script_share)
@@ -344,6 +418,12 @@ def main():
     env = VecMonitor(SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
 
     algo = MaskablePPO if args.mask else PPO
+    if args.flat_action and not args.mask:
+        # The joint action space is worth having mostly because the mask can then be
+        # exact per cell, and the spatial head is written against the masked policy.
+        raise SystemExit("--flat-action requires --mask (or pass --no-flat-action)")
+    # Only the head differs; see `CRSpatialPolicy`.
+    policy = CRSpatialPolicy if args.flat_action else "MultiInputPolicy"
     if args.init_from:
         # Self-play from a random policy throws away the run that already reached 96%
         # against the rusher script. Load those weights and keep the same env and
@@ -355,7 +435,7 @@ def main():
         print(f"resumed from {args.init_from}", flush=True)
     else:
         model = algo(
-            "MultiInputPolicy", env,
+            policy, env,
             policy_kwargs={"features_extractor_class": CRFeatureExtractor},
             n_steps=args.n_steps, batch_size=args.batch_size,
             learning_rate=args.learning_rate, n_epochs=args.n_epochs,
@@ -378,7 +458,8 @@ def main():
     else:
         callbacks.append(RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs,
                                             rich_obs=args.rich_obs,
-                                            count_obs=args.count_obs))
+                                            count_obs=args.count_obs,
+                                            flat_action=args.flat_action))
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
                     tb_log_name=args.run_name, reset_num_timesteps=False)
