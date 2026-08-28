@@ -63,12 +63,14 @@ class GameServer:
         observation it was trained on rather than a second implementation of it that
         could drift.
         """
-        from environment import CREnv, count_obs_for, flat_action_for, rich_obs_for
+        from environment import (CREnv, count_obs_for, flat_action_for, frames_for,
+                                 rich_obs_for)
         self.ai_model = model
         self.ai_env = CREnv(opponent_model=None, learner_player=1,
                             rich_obs=rich_obs_for(model),
                             count_obs=count_obs_for(model),
-                            flat_action=flat_action_for(model))
+                            flat_action=flat_action_for(model),
+                            frames=frames_for(model))
         self.ai_env.battle = self.battle
         self.ai_env.learner = 1
         self.ai_env._plays = [[], []]

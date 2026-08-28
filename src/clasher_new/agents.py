@@ -11,6 +11,7 @@ attributes the caller needs in order to build a matching environment:
     act.rich_obs     this side wants the clock/crowns/opponent-elixir/card-count inputs
     act.count_obs    this side wants the two per-cell unit-count channels
     act.flat_action  this side speaks the joint action space, not `(slot, y, x)`
+    act.frames       how many stacked frames of history its grid carries
     act.masked       this side must be handed `env.action_masks(player)` every decision
 """
 import json
@@ -18,8 +19,8 @@ import os
 import random
 import zipfile
 
-from environment import (N_SLOTS, count_obs_for, flat_action_for, random_strategy,
-                         rich_obs_for)
+from environment import (N_SLOTS, count_obs_for, flat_action_for, frames_for,
+                         random_strategy, rich_obs_for)
 from scripts_defender import make_anchor, make_defender
 from scripts_counter import make_counter
 from scripts_sniper import make_sniper
@@ -89,6 +90,9 @@ def load_agent(spec, deterministic=False):
         wrapped.count_obs = False
         # Scripts answer with a `(slot, y, x)` triple whatever the run trains on.
         wrapped.flat_action = False
+        # They read fixed channel indices, which a stacked grid keeps pointing at the
+        # current frame -- but a ruler that changes between rounds is not a ruler.
+        wrapped.frames = 1
         wrapped.masked = False
         wrapped.name = spec
         # A stateful script has to be told when a new game starts, or it carries the last
@@ -115,6 +119,7 @@ def load_agent(spec, deterministic=False):
     act.rich_obs = rich_obs_for(model)
     act.count_obs = count_obs_for(model)
     act.flat_action = flat_action_for(model)
+    act.frames = frames_for(model)
     act.masked = masked
     act.name = os.path.basename(spec)
     act.model = model

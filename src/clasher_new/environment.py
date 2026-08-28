@@ -147,7 +147,8 @@ class CREnv(gym.Env):
                  record_path=None, record_every=20,
                  rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0,
                  elixir_scale=0.0, count_obs=False, opponent_count_obs=None,
-                 flat_action=False, opponent_flat_action=None):
+                 flat_action=False, opponent_flat_action=None,
+                 frames=1, opponent_frames=None):
         super().__init__()
         self.opponent = opponent_model
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
@@ -173,6 +174,19 @@ class CREnv(gym.Env):
         # Same reason the rich observation is served per side: the two encodings are
         # different input widths, so a match between them has to hand each side its own.
         self.count_obs_opponent = count_obs if opponent_count_obs is None else opponent_count_obs
+        # `frames` stacks the last N grids into one observation, newest first. A single
+        # snapshot says where every unit is and nothing about where it is going: a Giant
+        # walking at our tower and one that was just pulled back read identically, and so
+        # does a tower that lost 40% of its health this second and one that lost it ten
+        # seconds ago. Both are questions this game turns on. Newest first, so the fixed
+        # channel indices the scripts read still land on the current frame.
+        self.frames = frames
+        # Mirrors the learner by default, like the other observation flags: what this env
+        # produces for the opponent is at worst ignored.
+        self.frames_opponent = frames if opponent_frames is None else opponent_frames
+        self._grid_history = {0: [], 1: []}
+        self._obs_step = {0: -1, 1: -1}
+        self._step_index = 0
         # Weight on the tower-damage shaping terms. At 1.0 the shaping available over a
         # full game (~10.9) rivals the terminal win bonus (10), which pays for constant
         # output regardless of whether the trade was good.
@@ -247,6 +261,9 @@ class CREnv(gym.Env):
         self._deck_1 = [DECK[i] for i in self.np_random.permutation(len(DECK))]
         self._episode_index += 1
         self._plays = [[], []]
+        self._grid_history = {0: [], 1: []}
+        self._obs_step = {0: -1, 1: -1}
+        self._step_index = 0
         self._recording = None
         if self.record_path and self._episode_index % self.record_every == 0:
             self._recording = {"deck_0": self._deck_0[:], "deck_1": self._deck_1[:],
@@ -497,6 +514,7 @@ class CREnv(gym.Env):
         """
 
         action = action_triple(action, self.flat_action)
+        self._step_index += 1
         me = self.battle.players[self.learner]
         foe = self.battle.players[1 - self.learner]
         my_hps_old = me.king_tower_hp+me.left_tower_hp+me.right_tower_hp
@@ -606,10 +624,41 @@ class CREnv(gym.Env):
 
     @property
     def n_grid_channels(self):
-        return N_UNIT_CHANNELS + (N_COUNT_CHANNELS if self.count_obs else 0)
+        return (N_UNIT_CHANNELS + (N_COUNT_CHANNELS if self.count_obs else 0)) * self.frames
 
     def observe(self, player_id_observe=0):
-        """Gives an egocentric representation of the game state.
+        """The observation this player acts on: the current frame, plus its recent past.
+
+        `_frame` is one snapshot. Stacking is done here rather than by a vectorised
+        wrapper because the opponent is served from inside this env -- a wrapper would
+        stack the learner's observation and hand the opponent a bare snapshot, which under
+        self-play means the two sides are not playing the same game.
+
+        A frame is appended once per decision. Calling this twice within one step
+        replaces the newest frame instead of appending, so a tool that reads the
+        observation without stepping does not quietly shift the history.
+        """
+        frame = self._frame(player_id_observe)
+        frames = self.frames if player_id_observe == self.learner else self.frames_opponent
+        if frames <= 1:
+            return frame
+        history = self._grid_history[player_id_observe]
+        if not history:
+            # The opening decision has no past. Repeating the current frame says "nothing
+            # has moved", which is true, where zeros would say "the arena was empty".
+            history.extend([frame["grid"]] * frames)
+            self._obs_step[player_id_observe] = self._step_index
+        elif self._obs_step[player_id_observe] != self._step_index:
+            history.append(frame["grid"])
+            del history[:-frames]
+            self._obs_step[player_id_observe] = self._step_index
+        else:
+            history[-1] = frame["grid"]
+        frame["grid"] = np.concatenate(history[::-1], axis=-1)
+        return frame
+
+    def _frame(self, player_id_observe=0):
+        """One snapshot of the game state, egocentric.
 
         The grid is always drawn from `player_id_observe`'s point of view: own units occupy
         the low rows, the enemy the high rows, and channel 1 is 0 for own units and 1 for the
@@ -686,6 +735,25 @@ def rich_obs_for(model):
     return "context" in getattr(space, "spaces", {})
 
 
+def grid_layout(width):
+    """The (count_obs, frames) a grid of this width was built from.
+
+    The two base widths are 15 and 17, and the smallest multiple of 15 that is also a
+    multiple of 17 is 255 -- seventeen frames -- so within any stack we would ever run
+    this is unambiguous.
+    """
+    for base, counted in ((N_UNIT_CHANNELS + N_COUNT_CHANNELS, True), (N_UNIT_CHANNELS, False)):
+        if width % base == 0:
+            return counted, width // base
+    raise ValueError(f"grid width {width} is not a whole number of frames")
+
+
+def _grid_width_of(model):
+    space = getattr(model, "observation_space", None)
+    grid = getattr(space, "spaces", {}).get("grid")
+    return None if grid is None else grid.shape[-1]
+
+
 def count_obs_for(model):
     """Whether this checkpoint was trained with the per-cell count channels.
 
@@ -693,9 +761,15 @@ def count_obs_for(model):
     reason as `rich_obs_for`: handing a 15-channel checkpoint a 17-channel observation is
     a shape error, and the reverse is a silently wrong measurement.
     """
-    space = getattr(model, "observation_space", None)
-    grid = getattr(space, "spaces", {}).get("grid")
-    return bool(grid is not None and grid.shape[-1] >= N_UNIT_CHANNELS + N_COUNT_CHANNELS)
+    width = _grid_width_of(model)
+    return False if width is None else grid_layout(width)[0]
+
+
+def frames_for(model):
+    """How many frames of history this checkpoint's grid carries. 1 means a single
+    snapshot, which is what every run before frame stacking was trained on."""
+    width = _grid_width_of(model)
+    return 1 if width is None else grid_layout(width)[1]
 
 
 def random_strategy(observation):

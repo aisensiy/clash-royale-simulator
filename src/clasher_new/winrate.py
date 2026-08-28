@@ -48,7 +48,7 @@ def play(args):
     # A fresh instance per worker: the defender scripts keep state between decisions.
     env = CREnv(opponent_model=SCRIPTS[opp_name](seed), legacy_obs=cfg["legacy_obs"],
                 rich_obs=agent.rich_obs, count_obs=agent.count_obs,
-                flat_action=agent.flat_action)
+                flat_action=agent.flat_action, frames=agent.frames)
     wins = losses = draws = 0
     for ep in range(n_episodes):
         env.learner_player = ep % 2

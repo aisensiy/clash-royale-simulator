@@ -6,7 +6,7 @@ from agents import make_rusher
 from scripts_defender import make_defender
 from scripts_sniper import make_sniper
 from environment import (ARENA_H, ARENA_W, CREnv, N_FLAT_ACTIONS, N_SLOTS,
-                         entity_names, random_strategy)
+                         entity_names, grid_layout, random_strategy)
 from selfplay import OpponentPool, PooledOpponent
 
 from gymnasium import spaces
@@ -42,8 +42,12 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         # Two of the grid channels are consumed rather than fed in: the entity id becomes
         # an embedding and the card type a one-hot. Read the width off the space so that
         # adding a channel to the observation does not need an edit here as well.
-        grid_channels = spaces_["grid"].shape[-1]
-        self.in_channels = (grid_channels - 2) + self.embedding_dim + 4
+        # A stacked grid is N copies of one frame's channels laid end to end, newest
+        # first. Each frame gets the same treatment -- its entity id embedded, its card
+        # type one-hot -- so the width per frame is what it always was, times the stack.
+        _, self.frames = grid_layout(spaces_["grid"].shape[-1])
+        self.frame_channels = spaces_["grid"].shape[-1] // self.frames
+        self.in_channels = self.frames * ((self.frame_channels - 2) + self.embedding_dim + 4)
         self.cnn = nn.Sequential(
             nn.Conv2d(self.in_channels, 32, 3, padding=1), nn.ReLU(),
             nn.Conv2d(32, 64, 3, padding=1, stride=2), nn.ReLU(),
@@ -61,20 +65,23 @@ class CRFeatureExtractor(BaseFeaturesExtractor):
         Gets the observation, use the embedding (dim=8) to expand the channels, then use one-hot to further expand the channels.
         The code is ugly but should do the work.
         """
-        grid = observation['grid']  # (B, 32, 18, C)
+        grid = observation['grid']  # (B, 32, 18, C * frames)
         hand = observation['hand'].long()  # (B, 5)
         elixir = observation['elixir']
 
-        card_ids = grid[..., 0].long()
-        card_vecs = self.entity_embedding(card_ids)
+        planes = []
+        for f in range(self.frames):
+            frame = grid[..., f * self.frame_channels:(f + 1) * self.frame_channels]
+            card_ids = frame[..., 0].long()
+            card_vecs = self.entity_embedding(card_ids)
 
-        rest = grid[..., 1:]  # (B, 32, 18, 14)
-        x = torch.cat([rest, card_vecs], dim=-1)  # (B, 32, 18, 14+EMBED)
-        card_type = x[..., 0].long()  # (B, 32, 18)
-        card_type_oh = F.one_hot(card_type, num_classes=4).float()  # (B, 32, 18, 4)
-        rest = x[..., 1:]
-        x = torch.cat([rest, card_type_oh], dim=-1)
-        x = x.permute(0, 3, 1, 2).float()  # (B, C, 32, 18)
+            rest = frame[..., 1:]  # (B, 32, 18, C-1)
+            x = torch.cat([rest, card_vecs], dim=-1)  # (B, 32, 18, C-1+EMBED)
+            card_type = x[..., 0].long()  # (B, 32, 18)
+            card_type_oh = F.one_hot(card_type, num_classes=4).float()  # (B, 32, 18, 4)
+            rest = x[..., 1:]
+            planes.append(torch.cat([rest, card_type_oh], dim=-1))
+        x = torch.cat(planes, dim=-1).permute(0, 3, 1, 2).float()  # (B, C, 32, 18)
         # Kept for `SpatialActionHead`, which needs the arena at full resolution and runs
         # in the same forward pass. SB3 calls this extractor once per pass and shares it
         # between the policy and the value function, so there is exactly one live value.
@@ -275,7 +282,8 @@ class RandomEvalCallback(BaseCallback):
     # `n_episodes * 370` sequential env steps. At 100k/20 that was eating about as much
     # wall clock as the training it was measuring; 500k/10 brings it under 10%.
     def __init__(self, every=500_000, n_episodes=10, use_masking=True, legacy_obs=False,
-                 rich_obs=False, count_obs=False, flat_action=False, verbose=0):
+                 rich_obs=False, count_obs=False, flat_action=False, frames=1,
+                 verbose=0):
         super().__init__(verbose)
         self.every = every
         self.n_episodes = n_episodes
@@ -284,6 +292,7 @@ class RandomEvalCallback(BaseCallback):
         self.rich_obs = rich_obs
         self.count_obs = count_obs
         self.flat_action = flat_action
+        self.frames = frames
         self._next = None
 
     def _on_training_start(self):
@@ -297,7 +306,8 @@ class RandomEvalCallback(BaseCallback):
                                               legacy_obs=self.legacy_obs,
                                               rich_obs=self.rich_obs,
                                               count_obs=self.count_obs,
-                                              flat_action=self.flat_action)])
+                                              flat_action=self.flat_action,
+                                              frames=self.frames)])
         if self.use_masking:
             mean_reward, _ = maskable_evaluate_policy(
                 self.model, eval_env, n_eval_episodes=self.n_episodes,
@@ -312,7 +322,7 @@ class RandomEvalCallback(BaseCallback):
 
 def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
              record_path=None, record_every=20, rich_obs=False, count_obs=False,
-             flat_action=False, dmg_scale=1.0,
+             flat_action=False, frames=1, dmg_scale=1.0,
              elixir_scale=0.0, script_names=("random", "rusher"), script_weights=None,
              script_share=0.15):
     def _init():
@@ -343,7 +353,7 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
                     record_path=record_path, record_every=record_every,
                     rich_obs=rich_obs, count_obs=count_obs,
-                    flat_action=flat_action, dmg_scale=dmg_scale,
+                    flat_action=flat_action, frames=frames, dmg_scale=dmg_scale,
                     elixir_scale=elixir_scale)
         env.reset(seed=seed)
         return env
@@ -387,10 +397,16 @@ def main():
     parser.add_argument("--no-count-obs", dest="count_obs", action="store_false",
                         help="ablation: drop the per-cell unit-count channels")
     parser.set_defaults(count_obs=True)
-    parser.add_argument("--no-flat-action", dest="flat_action", action="store_false",
-                        help="ablation: keep the factorised (slot, row, column) action "
-                             "space instead of the joint one")
-    parser.set_defaults(flat_action=True)
+    # Off by default after two 12M-step runs lost the head-to-head 17% each. The exact
+    # per-cell mask it enables is a real win and is kept unconditionally; the encoding
+    # itself is not, and the run that would tell us whether the joint space or the head
+    # that came with it was at fault has not been done. See `CRSpatialPolicy`.
+    parser.add_argument("--flat-action", dest="flat_action", action="store_true",
+                        help="model the placement as one joint choice over 2305 outcomes")
+    parser.set_defaults(flat_action=False)
+    parser.add_argument("--frames", type=int, default=1,
+                        help="stack this many consecutive grids into one observation, "
+                             "newest first; 1 is a single snapshot with no history")
     # Full tower damage is worth ~10.9 of shaping reward per game against a terminal win
     # bonus of 10, so trading badly still pays as long as something is being hit. Quartered,
     # the shaping keeps its role as a dense learning signal without outweighing the result.
@@ -439,7 +455,8 @@ def main():
     env_fns = [make_env(i, args.legacy_obs, pool_dir, args.mask, args.opponent_refresh,
                         record_path, args.record_every or 1,
                         rich_obs=args.rich_obs, count_obs=args.count_obs,
-                        flat_action=args.flat_action, dmg_scale=args.dmg_scale,
+                        flat_action=args.flat_action, frames=args.frames,
+                        dmg_scale=args.dmg_scale,
                         elixir_scale=args.elixir_scale,
                         script_names=script_names, script_weights=script_weights,
                         script_share=args.script_share)
@@ -488,7 +505,8 @@ def main():
         callbacks.append(RandomEvalCallback(use_masking=args.mask, legacy_obs=args.legacy_obs,
                                             rich_obs=args.rich_obs,
                                             count_obs=args.count_obs,
-                                            flat_action=args.flat_action))
+                                            flat_action=args.flat_action,
+                                            frames=args.frames))
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
                     tb_log_name=args.run_name, reset_num_timesteps=False)

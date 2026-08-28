@@ -32,7 +32,8 @@ def shard(args):
 
     agent = load_agent(path)
     env = CREnv(opponent_model=make_rusher(seed), rich_obs=agent.rich_obs,
-                count_obs=agent.count_obs, flat_action=agent.flat_action)
+                count_obs=agent.count_obs, flat_action=agent.flat_action,
+                frames=agent.frames)
     sizes, peak_elixir, played_games = Counter(), 0.0, 0
     for i in range(games):
         env.learner_player = i % 2
