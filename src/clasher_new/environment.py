@@ -9,6 +9,7 @@ import os
 from random import randint
 import time
 import numpy as np
+import random
 
 DECK = ['Knight', 'MiniPekka', 'Arrows', 'Minions', 'Musketeer', 'Fireball', 'Giant', 'Archer']
 
@@ -142,7 +143,7 @@ _ALL_CELLS = np.ones((ARENA_H, ARENA_W), dtype=bool)
 
 
 class CREnv(gym.Env):
-    def __init__(self, opponent_model=None, visualize=False, speed=1.0, legacy_obs=False,
+    def __init__(self, opponent_model=None, opponent_pool=None, visualize=False, speed=1.0, legacy_obs=False,
                  realtime=True, learner_player=None,
                  record_path=None, record_every=20,
                  rich_obs=False, opponent_rich_obs=None, dmg_scale=1.0,
@@ -151,6 +152,8 @@ class CREnv(gym.Env):
                  frames=1, opponent_frames=None):
         super().__init__()
         self.opponent = opponent_model
+        # From upstream: a pool of opponent callables, one drawn at random per episode.
+        self.opponent_pool = opponent_pool
         # `legacy_obs` reproduces the pre-fix encoding on purpose so the two can be
         # compared under identical conditions. Do not turn it on for real training.
         self.legacy_obs = legacy_obs
@@ -268,6 +271,9 @@ class CREnv(gym.Env):
         if self.record_path and self._episode_index % self.record_every == 0:
             self._recording = {"deck_0": self._deck_0[:], "deck_1": self._deck_1[:],
                                "learner": self.learner, "actions": []}
+        if self.opponent_pool:
+            # From upstream: rotate the opponent every episode.
+            self.opponent = random.choice(self.opponent_pool)
         self.battle = battle.BattleState(player.PlayerState(0, self._deck_0[:], 5.0),
                                          player.PlayerState(1, self._deck_1[:], 5.0))
         if self.visualize:
@@ -523,7 +529,10 @@ class CREnv(gym.Env):
         foe_left = 3-foe.get_crown_count()
         edge_old = self._elixir_edge() if self.elixir_scale else 0.0
 
-        self.deploy(self.learner, action)
+        # From upstream: a failed (illegal or blocked) deployment costs a little, so a
+        # policy off the mask has a gradient away from dead actions. deploy() reports
+        # whether the card actually hit the field.
+        succeed = self.deploy(self.learner, action)
         opponent_action = self.opponent_action()
         if self._recording is not None:
             self._recording["actions"].append(
@@ -563,6 +572,9 @@ class CREnv(gym.Env):
             elif self.battle.winner is not None:
                 reward -= 10
             # winner is None on an exact tiebreak draw: no terminal bonus either way.
+        if not succeed and action[0] != 0:
+            # From upstream: discourage whiffed deployments.
+            reward -= 0.05
 
         info = {}
         if self.battle.game_over:
@@ -671,7 +683,7 @@ class CREnv(gym.Env):
         mirror = (player_id_observe == 1)
         for id, each in self.battle.entities.items():
             if not each.is_alive: continue
-            if isinstance(each, battle.Projectile): continue
+            if each.name not in entity_names: continue
             entity_id = entity_names.index(each.name)
             card_type = card_types.index(each.data.type)
             relative_player = each.player if self.legacy_obs else int(each.player != player_id_observe)
@@ -680,7 +692,7 @@ class CREnv(gym.Env):
             attacks_ground, attacks_air = int(each.data.attack_ground), int(each.data.attack_air)
 
             speed = each.data.speed
-            hp_left = np.log(each.hp) / 10
+            hp_left = np.log(each.hp) / 10 if each.hp != 0 else 0
             hp_percentage = each.hp / each.data.hp if each.data.hp != 0 else 0
             hit_speed = each.data.hit_speed
             attack_range = each.data.range / 3
