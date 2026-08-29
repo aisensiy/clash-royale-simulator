@@ -4,3 +4,6 @@ src/clahser_new/cr_logs/
 .idea/
 *.xml
 *.iml
+checkpoints/
+__pycache__/
+
