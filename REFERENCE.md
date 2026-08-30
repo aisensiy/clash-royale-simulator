@@ -1,13 +1,14 @@
 # 参照物（基准 checkpoint）
 
-**当前参照物：`reference.zip` = `era5_flat_plain_final.zip`**（联合动作空间轮的
-plain 对照臂 final，12M steps）
+**当前参照物：`reference.zip` = `teachpool_final.zip`**（脚本老师对手池轮，12M steps）
 
-来源：OpenBayes `clash-royale-rl/2` job `/output/flat_ab/plain_final.zip`。
-编码：MaskablePPO + rich obs + count channels + factorised 动作空间，单帧。
+来源：OpenBayes `clash-royale-rl/2` job，`/output/cr_logs/teachpool_final.zip`。
+编码：MaskablePPO + rich obs + count channels + factorised 动作空间，单帧；
+自博弈池含加权脚本（defender:3, sniper:3, rusher:1, random:1，脚本采样占 35%）。
 
-2026-08-30 绝对棋力天梯第一（1076 Elo，锚定 rusher=700），见
-`ideas/absolute-ladder-2026-08-30.md`。
+2026-08-30 验收天梯（每对阵 100 局）：对旧参照物 65/100（p≈0.001），
+天梯分 1066 vs 985（+80）。行为画像无塔缩（常用列 8 vs 11，出牌后剩余圣水
+略更保守 0.68 vs 0.44）。详见 `ideas/teachpool-ladder-2026-08-30.md`。
 
 ## 规则
 
@@ -25,4 +26,5 @@ plain 对照臂 final，12M steps）
 
 | 日期 | 参照物 | Elo | 备注 |
 |---|---|---|---|
-| 2026-08-30 | era5_flat_plain_final（本文件 reference.zip） | 1076 | 首次设立；取代 ladder/best.zip（752） |
+| 2026-08-30 | era5_flat_plain_final | 1076 | 首次设立；取代 ladder/best.zip（752） |
+| 2026-08-30 | teachpool_final（本文件 reference.zip） | +80 vs 前任（同梯内） | 对前任 65/100；天梯曲线 6M→9M→final 仍在上升，后续值得延长训练 |
