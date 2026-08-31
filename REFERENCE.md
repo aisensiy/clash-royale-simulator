@@ -1,8 +1,8 @@
 # 参照物（基准 checkpoint）
 
-**当前参照物：`reference.zip` = `teachpool_final.zip`**（脚本老师对手池轮，12M steps）
+**当前参照物：`reference.zip` = `teachpool_21M.zip`**（脚本老师对手池轮，21M steps）
 
-来源：OpenBayes `clash-royale-rl/2` job，`/output/cr_logs/teachpool_final.zip`。
+来源：OpenBayes `clash-royale-rl/2` job，`/output/cr_logs/teachpool_final.zip`（续训至 21M 后的保存）。
 编码：MaskablePPO + rich obs + count channels + factorised 动作空间，单帧；
 自博弈池含加权脚本（defender:3, sniper:3, rusher:1, random:1，脚本采样占 35%）。
 
@@ -27,4 +27,5 @@
 | 日期 | 参照物 | Elo | 备注 |
 |---|---|---|---|
 | 2026-08-30 | era5_flat_plain_final | 1076 | 首次设立；取代 ladder/best.zip（752） |
-| 2026-08-30 | teachpool_final（本文件 reference.zip） | +80 vs 前任（同梯内） | 对前任 65/100；天梯曲线 6M→9M→final 仍在上升，后续值得延长训练 |
+| 2026-08-30 | teachpool_final 12M | +80 vs 前任（同梯内） | 对前任 65/100；曲线仍在上升 |
+| 2026-08-31 | teachpool_final 21M（本文件 reference.zip） | +98 vs 前任（同梯内） | 对前任 67/100；增速放缓但未收敛 |
