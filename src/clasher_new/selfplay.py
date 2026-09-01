@@ -8,6 +8,8 @@ import os
 import random
 import re
 
+from environment import count_obs_for, frames_for, rich_obs_for
+
 SNAPSHOT_RE = re.compile(r"^snapshot_(\d+)\.zip$")
 
 LATEST = "latest"
@@ -120,12 +122,20 @@ class PooledOpponent:
     """
 
     def __init__(self, pool, scripts, algo, refresh_every=10, seed=0, device="cpu",
-                 masked=False, flat_action=False):
+                 masked=False, flat_action=False, frames=1, rich_obs=False):
         self.pool = pool
         self.scripts = scripts          # name -> callable(observation) -> action
         self.algo = algo                # PPO or MaskablePPO
         self._masked = masked
         self._flat_action = flat_action
+        # What the environment serves its opponent this run. Count channels are the
+        # exception: those follow the loaded checkpoint (see `count_obs`), because a
+        # mixed pool is exactly how opponents from other training lineages join.
+        self.expected_frames = frames
+        self.expected_rich = rich_obs
+        # Read by CREnv.reset after the episode-start hook: whatever opponent is
+        # loaded now gets its own count encoding served, defaulting to the run's.
+        self.count_obs = False
         self.refresh_every = refresh_every
         self.device = device
         self.rng = random.Random(seed)
@@ -170,10 +180,25 @@ class PooledOpponent:
         self.label = label
         if kind == SCRIPT:
             self._script = self.scripts[target]
+            self.count_obs = False
             return
         self._script = None
         if target != self._policy_path:
-            self._policy = self.algo.load(target, device=self.device)
+            policy = self.algo.load(target, device=self.device)
+            # The #7 crash class, enforced at the load site instead of discovered as
+            # a worker shape error two episodes later: a checkpoint that expects a
+            # different grid width or frame depth than this run serves names itself
+            # here, before it can enter a pool directory unnoticed.
+            got_rich, got_frames = rich_obs_for(policy), frames_for(policy)
+            if got_rich != self.expected_rich or got_frames != self.expected_frames:
+                raise ValueError(
+                    f"{target}: checkpoint serves rich={got_rich} frames={got_frames} "
+                    f"but this run serves rich={self.expected_rich} "
+                    f"frames={self.expected_frames} -- encoding mismatch")
+            # Count channels follow the checkpoint, not the run: the environment
+            # re-serves each opponent its own encoding in `reset`.
+            self.count_obs = count_obs_for(policy)
+            self._policy = policy
             self._policy_path = target
 
     def __call__(self, observation, action_masks=None):

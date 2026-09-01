@@ -281,6 +281,13 @@ class CREnv(gym.Env):
         # Self-play opponents rotate between episodes; scripted ones have no hook.
         if hasattr(self.opponent, "on_episode_start"):
             self.opponent.on_episode_start()
+        # A pooled checkpoint carries its own count encoding (`PooledOpponent.count_obs`),
+        # so a mixed pool can hold 15-channel veterans next to 17-channel snapshots of
+        # the learner. Scripts and unflagged callables keep whatever the constructor
+        # decided. Without this sync the run serves every opponent the learner's own
+        # width, which is the #7 crash class from the other side.
+        if hasattr(self.opponent, "count_obs"):
+            self.count_obs_opponent = self.opponent.count_obs
         return self.observe(self.learner), {}
 
     def deploy(self, player_id, action):

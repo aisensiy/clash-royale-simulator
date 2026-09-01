@@ -349,7 +349,8 @@ def make_env(seed, legacy_obs, pool_dir=None, masked=False, refresh_every=10,
                                 p_history=history, p_script=script_share)
             opponent = PooledOpponent(pool, scripts, algo,
                                       refresh_every=refresh_every, seed=seed,
-                                      masked=masked, flat_action=flat_action)
+                                      masked=masked, flat_action=flat_action,
+                                      frames=frames, rich_obs=rich_obs)
         env = CREnv(opponent_model=opponent, legacy_obs=legacy_obs,
                     record_path=record_path, record_every=record_every,
                     rich_obs=rich_obs, count_obs=count_obs,
