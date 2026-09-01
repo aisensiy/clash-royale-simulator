@@ -195,11 +195,13 @@ class PooledOpponent:
                     f"{target}: checkpoint serves rich={got_rich} frames={got_frames} "
                     f"but this run serves rich={self.expected_rich} "
                     f"frames={self.expected_frames} -- encoding mismatch")
-            # Count channels follow the checkpoint, not the run: the environment
-            # re-serves each opponent its own encoding in `reset`.
-            self.count_obs = count_obs_for(policy)
             self._policy = policy
             self._policy_path = target
+        # Recomputed unconditionally. The draw-again short circuit above must not
+        # carry the script branch's `False` into a checkpoint episode: that exact
+        # stale flag served a 15-channel grid to a 17-channel policy and killed a
+        # worker an hour into leaguepool2.
+        self.count_obs = count_obs_for(self._policy)
 
     def __call__(self, observation, action_masks=None):
         if self._script is not None:
