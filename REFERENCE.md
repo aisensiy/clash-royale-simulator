@@ -1,8 +1,8 @@
 # 参照物（基准 checkpoint）
 
-**当前参照物：`reference.zip` = `leaguepool_28M.zip`**（外援联池轮，28.09M steps）
+**当前参照物：`reference.zip` = `leaguepool2_42M.zip`**（leaguepool v2 轮，42.09M steps）
 
-来源：OpenBayes `clash-royale-rl/2` job，`/output/cr_logs/leaguepool_final.zip`。
+来源：OpenBayes `clash-royale-rl/2` job，`/output/cr_logs/leaguepool2_final.zip`（续训至 42.09M）。
 编码：MaskablePPO + rich obs + count channels + factorised 动作空间，单帧；
 自博弈池含加权脚本（defender:3, sniper:3, rusher:1, random:1，脚本采样占 35%）。
 
@@ -30,3 +30,4 @@
 | 2026-08-30 | teachpool_final 12M | +80 vs 前任（同梯内） | 对前任 65/100；曲线仍在上升 |
 | 2026-08-31 | teachpool_final 21M（本文件 reference.zip） | +98 vs 前任（同梯内） | 对前任 67/100；增速放缓但未收敛 |
 | 2026-08-31 | leaguepool_28M（本文件 reference.zip） | 同梯 +49，H2H 119/200 p≈0.008 | 边缘晋级（用户特批）：略优+风格更多样；棋力线 +50 未过 |
+| 2026-09-02 | leaguepool2_42M（本文件 reference.zip） | 同梯 +104，H2H 69/100 p≈8e-7 | 首次显著达标晋级；风格大幅多样化（常用列 13、占比 23%） |
